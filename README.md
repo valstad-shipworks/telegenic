@@ -63,8 +63,8 @@ methods return `Disconnected` while no link is up.
 ## Python
 
 The same library ships as a Python package (PyO3/maturin, `py` feature;
-`pip install telegenic` once published, or `maturin develop` from a
-checkout). The GenICam surface maps one-to-one, every blocking call
+`pip install telegenicam` once published, or `maturin develop` from a
+checkout. The import name stays `telegenic`). The GenICam surface maps one-to-one, every blocking call
 releases the GIL, and frames expose their pixels as `bytes` for
 `numpy.frombuffer`:
 

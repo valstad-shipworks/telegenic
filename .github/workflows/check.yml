@@ -1,0 +1,56 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+
+    runs-on: ubuntu-latest
+    name: ${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install llvm-dlltool
+        if: contains(matrix.target, 'windows')
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Cargo check
+        run: cargo check --target ${{ matrix.target }}
+
+      - name: Cargo check all features
+        run: cargo check --target ${{ matrix.target }} --all-features
+
+      - name: Clippy
+        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+
+      - name: Clippy all features
+        run: cargo clippy --target ${{ matrix.target }} --all-features -- -D warnings
+
+      - name: Tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --target ${{ matrix.target }}
