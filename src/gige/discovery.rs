@@ -55,7 +55,12 @@ pub fn enumerate_adapters() -> io::Result<Vec<NetworkAdapter>> {
         let broadcast = v4
             .broadcast
             .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)));
-        out.push(NetworkAdapter { name: iface.name, ip: v4.ip, netmask: v4.netmask, broadcast });
+        out.push(NetworkAdapter {
+            name: iface.name,
+            ip: v4.ip,
+            netmask: v4.netmask,
+            broadcast,
+        });
     }
     Ok(out)
 }
@@ -145,7 +150,9 @@ pub fn discover(cfg: &DiscoveryConfig) -> Result<Vec<DiscoveredDevice>> {
             break;
         }
         for (adapter, socket) in &sockets {
-            socket.set_read_timeout(Some(Duration::from_millis(20))).ok();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .ok();
             let (n, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
                 Err(ref e)
@@ -195,7 +202,11 @@ fn parse_discovery_ack(
         return None;
     }
     let info = DeviceInfo::parse(ack.payload)?;
-    Some(DiscoveredDevice { info, from, adapter: adapter.clone() })
+    Some(DiscoveredDevice {
+        info,
+        from,
+        adapter: adapter.clone(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -244,7 +255,11 @@ pub fn force_ip(
                 continue;
             }
         };
-        for dest in beacon_destinations(&adapter, cfg.discovery.limited_broadcast, cfg.discovery.device_port) {
+        for dest in beacon_destinations(
+            &adapter,
+            cfg.discovery.limited_broadcast,
+            cfg.discovery.device_port,
+        ) {
             if let Err(e) = socket.send_to(&packet, dest) {
                 tracing::trace!("force-ip: send to {dest} failed: {e}");
             }
@@ -256,8 +271,12 @@ pub fn force_ip(
     let mut buf = [0u8; 256];
     while Instant::now() < deadline {
         for socket in &sockets {
-            socket.set_read_timeout(Some(Duration::from_millis(20))).ok();
-            let Ok((n, _)) = socket.recv_from(&mut buf) else { continue };
+            socket
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .ok();
+            let Ok((n, _)) = socket.recv_from(&mut buf) else {
+                continue;
+            };
             if let Some(ack) = Ack::parse(&buf[..n])
                 && ack.answer == gvcp::FORCEIP_ACK
                 && !ack.status.is_error()

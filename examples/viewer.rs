@@ -24,7 +24,10 @@ fn main() -> eframe::Result {
     cam.connect().expect("connect");
     {
         let info = cam.transport().device_info().expect("device info");
-        println!("{} {} (serial {})", info.manufacturer, info.model, info.serial);
+        println!(
+            "{} {} (serial {})",
+            info.manufacturer, info.model, info.serial
+        );
     }
 
     set_number(&mut cam, "ExposureTime", EXPOSURE_US);
@@ -47,7 +50,11 @@ fn main() -> eframe::Result {
     let mut cfg = StreamConfig::new(0);
     cfg.n_buffers = 16;
     let stream = cam.start_acquisition(cfg).expect("start acquisition");
-    println!("streaming to {} with packet size {}", stream.local_addr(), stream.packet_size());
+    println!(
+        "streaming to {} with packet size {}",
+        stream.local_addr(),
+        stream.packet_size()
+    );
     let frames = stream.subscribe(4);
 
     let options = eframe::NativeOptions {
@@ -125,7 +132,8 @@ impl Viewer {
         match &mut self.texture {
             Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
             None => {
-                self.texture = Some(ctx.load_texture("camera", image, egui::TextureOptions::LINEAR));
+                self.texture =
+                    Some(ctx.load_texture("camera", image, egui::TextureOptions::LINEAR));
             }
         }
 

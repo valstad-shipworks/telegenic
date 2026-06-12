@@ -256,7 +256,11 @@ impl StreamRunner {
         slot.reset(n_packets);
 
         if inc > 1 {
-            tracing::trace!(skipped = inc - 1, after = self.last_frame_id, "frame ids skipped");
+            tracing::trace!(
+                skipped = inc - 1,
+                after = self.last_frame_id,
+                "frame ids skipped"
+            );
             self.stats.missing_frames += inc as u64 - 1;
         }
         self.last_frame_id = view.frame_id;
@@ -344,7 +348,10 @@ impl StreamRunner {
                 frame.block_size = view.data.len();
                 if !frame.trailer_seen {
                     frame.n_packets = self.cfg.payload_size.div_ceil(frame.block_size) + 2;
-                    frame.slot.packets.resize(frame.n_packets, Default::default());
+                    frame
+                        .slot
+                        .packets
+                        .resize(frame.n_packets, Default::default());
                 }
             }
         }
@@ -429,7 +436,9 @@ impl StreamRunner {
             if need_resend && first_missing.is_none() {
                 first_missing = Some(i);
             }
-            if (i > packet_id || !need_resend) && let Some(first) = first_missing.take() {
+            if (i > packet_id || !need_resend)
+                && let Some(first) = first_missing.take()
+            {
                 let last = i - 1;
                 let n_missing = last - first + 1;
                 if frame.n_resend_requests + n_missing > max_requests {
@@ -466,7 +475,10 @@ impl StreamRunner {
             extended_ids,
             self.resend_id,
         );
-        if let Err(e) = self.socket.send_to(&self.resend_buf[..len], self.device_gvcp_addr) {
+        if let Err(e) = self
+            .socket
+            .send_to(&self.resend_buf[..len], self.device_gvcp_addr)
+        {
             tracing::trace!("resend request send failed: {e}");
         }
     }
@@ -513,7 +525,11 @@ impl StreamRunner {
     fn close_frame(&mut self, index: usize, status: FrameStatus) {
         let frame = self.frames.remove(index);
         if status != FrameStatus::Complete {
-            tracing::trace!(frame_id = frame.frame_id, ?status, "frame closed incomplete");
+            tracing::trace!(
+                frame_id = frame.frame_id,
+                ?status,
+                "frame closed incomplete"
+            );
         }
         match status {
             FrameStatus::Complete => self.stats.completed_frames += 1,
@@ -565,14 +581,15 @@ impl StreamRunner {
         };
         let out = Arc::new(out);
         let mut dropped = 0u64;
-        self.subscribers.retain(|tx| match tx.try_send(out.clone()) {
-            Ok(()) => true,
-            Err(flume::TrySendError::Full(_)) => {
-                dropped += 1;
-                true
-            }
-            Err(flume::TrySendError::Disconnected(_)) => false,
-        });
+        self.subscribers
+            .retain(|tx| match tx.try_send(out.clone()) {
+                Ok(()) => true,
+                Err(flume::TrySendError::Full(_)) => {
+                    dropped += 1;
+                    true
+                }
+                Err(flume::TrySendError::Disconnected(_)) => false,
+            });
         self.stats.frames_dropped += dropped;
     }
 

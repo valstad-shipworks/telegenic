@@ -77,7 +77,10 @@ fn u32_at(buf: &[u8], pos: usize) -> Result<u32, String> {
 #[cfg(test)]
 pub(crate) fn build_zip(filename: &str, content: &[u8], deflate: bool) -> Vec<u8> {
     let (method, data): (u16, Vec<u8>) = if deflate {
-        (METHOD_DEFLATE, miniz_oxide::deflate::compress_to_vec(content, 6))
+        (
+            METHOD_DEFLATE,
+            miniz_oxide::deflate::compress_to_vec(content, 6),
+        )
     } else {
         (METHOD_STORED, content.to_vec())
     };

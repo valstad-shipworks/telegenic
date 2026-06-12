@@ -13,11 +13,11 @@ use flume::{Receiver, TryRecvError};
 use snare::mio::net::UdpSocket;
 use snare::mio::{Events, Interest, Poll, Token, Waker};
 
-use crate::gige::{GigeConfig, GvcpEvent, Shared};
 use crate::error::CameraError;
-use crate::handle::ResponseHandle;
 use crate::gige::proto::bootstrap;
 use crate::gige::proto::gvcp::{self, Ack};
+use crate::gige::{GigeConfig, GvcpEvent, Shared};
+use crate::handle::ResponseHandle;
 use crate::thread_util::ThreadHandle;
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -30,18 +30,39 @@ pub(crate) enum ToWorker {
     ReadReg(u32, ResponseHandle<u32>),
     ReadRegs(Vec<u32>, ResponseHandle<Vec<u32>>),
     WriteRegs(Vec<(u32, u32)>, ResponseHandle<()>),
-    ReadMem { addr: u32, len: u32, handle: ResponseHandle<Vec<u8>> },
-    WriteMem { addr: u32, data: Vec<u8>, handle: ResponseHandle<()> },
+    ReadMem {
+        addr: u32,
+        len: u32,
+        handle: ResponseHandle<Vec<u8>>,
+    },
+    WriteMem {
+        addr: u32,
+        data: Vec<u8>,
+        handle: ResponseHandle<()>,
+    },
     SubscribeEvents(flume::Sender<GvcpEvent>),
     Shutdown,
 }
 
 enum Op {
     ReadReg(ResponseHandle<u32>),
-    ReadRegs { handle: ResponseHandle<Vec<u32>>, count: usize },
+    ReadRegs {
+        handle: ResponseHandle<Vec<u32>>,
+        count: usize,
+    },
     WriteRegs(ResponseHandle<()>),
-    ReadMem { handle: ResponseHandle<Vec<u8>>, acc: Vec<u8>, want: usize, next_addr: u32 },
-    WriteMem { handle: ResponseHandle<()>, data: Vec<u8>, offset: usize, base_addr: u32 },
+    ReadMem {
+        handle: ResponseHandle<Vec<u8>>,
+        acc: Vec<u8>,
+        want: usize,
+        next_addr: u32,
+    },
+    WriteMem {
+        handle: ResponseHandle<()>,
+        data: Vec<u8>,
+        offset: usize,
+        base_addr: u32,
+    },
     Heartbeat,
 }
 
@@ -199,7 +220,9 @@ impl Runner {
             self.shared.stats.lock().pending_acks += 1;
             return;
         }
-        let Some(inflight) = self.inflight.take() else { return };
+        let Some(inflight) = self.inflight.take() else {
+            return;
+        };
         self.on_ack(inflight, ack);
     }
 
@@ -213,7 +236,10 @@ impl Runner {
                 return;
             }
             let command = inflight.op.expected_ack().wrapping_sub(1);
-            inflight.op.fail(CameraError::Nak { command, status: ack.status });
+            inflight.op.fail(CameraError::Nak {
+                command,
+                status: ack.status,
+            });
             return;
         }
         let expected_ack = inflight.op.expected_ack();
@@ -241,7 +267,12 @@ impl Runner {
                 }
             }
             Op::WriteRegs(handle) => handle.fulfill(Ok(())),
-            Op::ReadMem { handle, mut acc, want, next_addr } => {
+            Op::ReadMem {
+                handle,
+                mut acc,
+                want,
+                next_addr,
+            } => {
                 let Some(data) = ack.payload.get(4..) else {
                     handle.fail(CameraError::Protocol("short read memory ack".into()));
                     return;
@@ -254,22 +285,41 @@ impl Runner {
                     handle.fail(CameraError::Protocol("empty read memory ack".into()));
                 } else {
                     let next_addr = next_addr.wrapping_add(take as u32);
-                    let op = Op::ReadMem { handle, acc, want, next_addr };
+                    let op = Op::ReadMem {
+                        handle,
+                        acc,
+                        want,
+                        next_addr,
+                    };
                     self.send_op(op, PendingSend::ReadMemChunk);
                 }
             }
-            Op::WriteMem { handle, data, mut offset, base_addr } => {
+            Op::WriteMem {
+                handle,
+                data,
+                mut offset,
+                base_addr,
+            } => {
                 offset += chunk_len(data.len() - offset);
                 if offset >= data.len() {
                     handle.fulfill(Ok(()));
                 } else {
-                    let op = Op::WriteMem { handle, data, offset, base_addr };
+                    let op = Op::WriteMem {
+                        handle,
+                        data,
+                        offset,
+                        base_addr,
+                    };
                     self.send_op(op, PendingSend::WriteMemChunk);
                 }
             }
             Op::Heartbeat => {
                 self.shared.stats.lock().heartbeats += 1;
-                if ack.register_values().next().is_none_or(|ccp| ccp & bootstrap::CCP_CONTROL == 0) {
+                if ack
+                    .register_values()
+                    .next()
+                    .is_none_or(|ccp| ccp & bootstrap::CCP_CONTROL == 0)
+                {
                     tracing::warn!("device control was lost (CCP cleared)");
                     self.control_lost = true;
                 }
@@ -296,14 +346,15 @@ impl Runner {
         }
         self.shared.stats.lock().events += 1;
         let event = GvcpEvent::parse(cmd.command, cmd.payload);
-        self.event_txs.retain(|tx| match tx.try_send(event.clone()) {
-            Ok(()) => true,
-            Err(flume::TrySendError::Full(_)) => {
-                tracing::trace!("event channel full, event dropped");
-                true
-            }
-            Err(flume::TrySendError::Disconnected(_)) => false,
-        });
+        self.event_txs
+            .retain(|tx| match tx.try_send(event.clone()) {
+                Ok(()) => true,
+                Err(flume::TrySendError::Full(_)) => {
+                    tracing::trace!("event channel full, event dropped");
+                    true
+                }
+                Err(flume::TrySendError::Disconnected(_)) => false,
+            });
     }
 
     fn drain_commands(&mut self) -> bool {
@@ -329,7 +380,12 @@ impl Runner {
                     self.enqueue(op, PendingSend::ReadMemChunk);
                 }
                 Ok(ToWorker::WriteMem { addr, data, handle }) => {
-                    let op = Op::WriteMem { handle, data, offset: 0, base_addr: addr };
+                    let op = Op::WriteMem {
+                        handle,
+                        data,
+                        offset: 0,
+                        base_addr: addr,
+                    };
                     self.enqueue(op, PendingSend::WriteMemChunk);
                 }
                 Ok(ToWorker::SubscribeEvents(tx)) => self.event_txs.push(tx),
@@ -362,14 +418,34 @@ impl Runner {
         let datagram = match (&op, send) {
             (_, PendingSend::ReadRegs(addrs)) => gvcp::encode_read_reg(&addrs, id),
             (_, PendingSend::WriteRegs(pairs)) => gvcp::encode_write_reg(&pairs, id),
-            (Op::ReadMem { acc, want, next_addr, .. }, PendingSend::ReadMemChunk) => {
+            (
+                Op::ReadMem {
+                    acc,
+                    want,
+                    next_addr,
+                    ..
+                },
+                PendingSend::ReadMemChunk,
+            ) => {
                 let remaining = want - acc.len();
                 let count = chunk_len(remaining.next_multiple_of(4));
                 gvcp::encode_read_mem(*next_addr, count as u16, id).to_vec()
             }
-            (Op::WriteMem { data, offset, base_addr, .. }, PendingSend::WriteMemChunk) => {
+            (
+                Op::WriteMem {
+                    data,
+                    offset,
+                    base_addr,
+                    ..
+                },
+                PendingSend::WriteMemChunk,
+            ) => {
                 let take = chunk_len(data.len() - offset);
-                gvcp::encode_write_mem(base_addr.wrapping_add(*offset as u32), &data[*offset..offset + take], id)
+                gvcp::encode_write_mem(
+                    base_addr.wrapping_add(*offset as u32),
+                    &data[*offset..offset + take],
+                    id,
+                )
             }
             (_, PendingSend::ReadMemChunk | PendingSend::WriteMemChunk) => {
                 op.fail(CameraError::Protocol("internal op/payload mismatch".into()));
@@ -391,7 +467,9 @@ impl Runner {
     }
 
     fn check_inflight_deadline(&mut self) {
-        let Some(inflight) = &mut self.inflight else { return };
+        let Some(inflight) = &mut self.inflight else {
+            return;
+        };
         if Instant::now() < inflight.deadline {
             return;
         }
@@ -410,7 +488,9 @@ impl Runner {
             return;
         }
         self.shared.stats.lock().timeouts += 1;
-        let Some(inflight) = self.inflight.take() else { return };
+        let Some(inflight) = self.inflight.take() else {
+            return;
+        };
         if matches!(inflight.op, Op::Heartbeat) {
             tracing::warn!("heartbeat timed out, considering control lost");
             self.control_lost = true;
@@ -424,8 +504,13 @@ impl Runner {
             return;
         }
         self.heartbeat_due = Instant::now() + self.heartbeat_period;
-        let pending_heartbeat = matches!(self.inflight, Some(Inflight { op: Op::Heartbeat, .. }))
-            || self.queue.iter().any(|op| matches!(op, Op::Heartbeat));
+        let pending_heartbeat = matches!(
+            self.inflight,
+            Some(Inflight {
+                op: Op::Heartbeat,
+                ..
+            })
+        ) || self.queue.iter().any(|op| matches!(op, Op::Heartbeat));
         if !pending_heartbeat {
             self.enqueue(
                 Op::Heartbeat,
@@ -435,7 +520,10 @@ impl Runner {
     }
 
     fn shutdown(&mut self) {
-        tracing::debug!(control_lost = self.control_lost, "gvcp worker shutting down");
+        tracing::debug!(
+            control_lost = self.control_lost,
+            "gvcp worker shutting down"
+        );
         let err = if self.control_lost {
             self.shared.set_control_lost();
             CameraError::ControlLost
@@ -453,10 +541,8 @@ impl Runner {
             // Best-effort control release so the device is immediately
             // claimable by the next application.
             self.next_id = gvcp::next_id(self.next_id);
-            let release = gvcp::encode_write_reg(
-                &[(bootstrap::CONTROL_CHANNEL_PRIVILEGE, 0)],
-                self.next_id,
-            );
+            let release =
+                gvcp::encode_write_reg(&[(bootstrap::CONTROL_CHANNEL_PRIVILEGE, 0)], self.next_id);
             let _ = self.socket.send_to(&release, self.device_addr);
         }
         self.event_txs.clear();
@@ -476,7 +562,8 @@ fn chunk_len(remaining: usize) -> usize {
 }
 
 fn heartbeat_period(cfg: &GigeConfig) -> Duration {
-    Duration::from_millis(u64::from(cfg.heartbeat_timeout_ms / 3).max(10)).min(Duration::from_secs(1))
+    Duration::from_millis(u64::from(cfg.heartbeat_timeout_ms / 3).max(10))
+        .min(Duration::from_secs(1))
 }
 
 /// Bind the control socket and launch the worker thread. Returns the owner

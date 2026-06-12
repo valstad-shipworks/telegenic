@@ -8,7 +8,7 @@ mod fake_camera;
 
 use std::time::Duration;
 
-use fake_camera::{FakeCamera, FrameOpts, FAKE_TIMESTAMP_TICKS};
+use fake_camera::{FAKE_TIMESTAMP_TICKS, FakeCamera, FrameOpts};
 use telegenic::gige::{GigECamera, GigeConfig};
 use telegenic::{FrameStatus, PacketSize, PayloadKind, PixelFormat, StreamConfig};
 
@@ -38,7 +38,9 @@ fn pattern(len: usize) -> Vec<u8> {
 fn clean_frame_reassembles() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
-    let stream = cam.open_stream(stream_config(2000, false)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(2000, false))
+        .expect("open stream");
     let frames = stream.subscribe(4);
 
     let payload = pattern(2000);
@@ -64,7 +66,9 @@ fn clean_frame_reassembles() {
 fn consecutive_frames_and_wraparound_ids() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
-    let stream = cam.open_stream(stream_config(1000, false)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(1000, false))
+        .expect("open stream");
     let frames = stream.subscribe(16);
 
     // Cross the 16-bit wrap; id 0 is invalid and skipped by devices.
@@ -95,7 +99,9 @@ fn consecutive_frames_and_wraparound_ids() {
 fn extended_ids_reassemble() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
-    let stream = cam.open_stream(stream_config(1500, true)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(1500, true))
+        .expect("open stream");
     let frames = stream.subscribe(4);
 
     let payload = pattern(1500);
@@ -113,7 +119,9 @@ fn extended_ids_reassemble() {
 fn out_of_order_and_duplicates() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
-    let stream = cam.open_stream(stream_config(2000, false)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(2000, false))
+        .expect("open stream");
     let frames = stream.subscribe(4);
 
     let payload = pattern(2000);
@@ -150,7 +158,10 @@ fn missing_packets_are_resent() {
     assert!(stats.resend_requests >= 3, "stats: {stats:?}");
     assert!(stats.resent_packets >= 3, "stats: {stats:?}");
     assert!(
-        fake.counters.resend_requests.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+        fake.counters
+            .resend_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
         "fake saw no resend command"
     );
 }
@@ -181,7 +192,9 @@ fn early_trailer_shrinks_the_frame() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
     // Buffer sized for 4000 bytes, actual payload only 1000.
-    let stream = cam.open_stream(stream_config(4000, false)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(4000, false))
+        .expect("open stream");
     let frames = stream.subscribe(4);
 
     let payload = pattern(1000);
@@ -215,7 +228,9 @@ fn pool_exhaustion_counts_underruns() {
     // recovers.
     drop(frames.recv_all());
     fake.send_gvsp_frame(3, &pattern(1000), &FrameOpts::new(BLOCK));
-    let frame = frames.wait_for(Duration::from_secs(1)).expect("frame after recovery");
+    let frame = frames
+        .wait_for(Duration::from_secs(1))
+        .expect("frame after recovery");
     assert_eq!(frame.frame_id, 3);
 }
 
@@ -237,18 +252,26 @@ fn auto_packet_size_negotiates_below_mtu() {
         "expected negotiation to land just under the 1400 MTU, got {size}"
     );
     // The final write must leave a plain size in SCPS (no fire-test bit).
-    assert_eq!(fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PACKET_SIZE), u32::from(size));
+    assert_eq!(
+        fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PACKET_SIZE),
+        u32::from(size)
+    );
 }
 
 #[test]
 fn closing_the_stream_zeroes_scp() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
-    let stream = cam.open_stream(stream_config(1000, false)).expect("open stream");
+    let stream = cam
+        .open_stream(stream_config(1000, false))
+        .expect("open stream");
     let port = fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PORT);
     assert_ne!(port, 0);
 
     drop(stream);
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PORT), 0);
+    assert_eq!(
+        fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PORT),
+        0
+    );
 }

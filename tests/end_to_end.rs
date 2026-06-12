@@ -85,7 +85,10 @@ fn features_evaluate_against_live_registers() {
     assert_eq!(fake.read_reg(0x2000), 64);
     assert_eq!(cam.get_integer("PayloadSize").unwrap(), 3200);
 
-    assert!(cam.has_feature("TLParamsLocked"), "injected default missing");
+    assert!(
+        cam.has_feature("TLParamsLocked"),
+        "injected default missing"
+    );
     assert!(!cam.has_feature("NoSuchFeature"));
 }
 
@@ -95,8 +98,14 @@ fn acquisition_uses_payload_size_and_streams() {
 
     let mut stream_cfg = telegenic::StreamConfig::new(0); // PayloadSize fills it
     stream_cfg.packet_size = PacketSize::Fixed(536); // 500-byte blocks
-    let stream = cam.start_acquisition(stream_cfg).expect("start acquisition");
-    assert_eq!(fake.read_reg(0x2008), 1, "AcquisitionStart must hit the register");
+    let stream = cam
+        .start_acquisition(stream_cfg)
+        .expect("start acquisition");
+    assert_eq!(
+        fake.read_reg(0x2008),
+        1,
+        "AcquisitionStart must hit the register"
+    );
 
     let frames = stream.subscribe(4);
     let payload: Vec<u8> = (0..2000u32).map(|i| i as u8).collect(); // Width*Height = 40*50
@@ -107,7 +116,11 @@ fn acquisition_uses_payload_size_and_streams() {
     assert_eq!(frame.data(), &payload[..]);
 
     cam.stop_acquisition().expect("stop");
-    assert_eq!(fake.read_reg(0x2008), 0, "AcquisitionStop must hit the register");
+    assert_eq!(
+        fake.read_reg(0x2008),
+        0,
+        "AcquisitionStop must hit the register"
+    );
 }
 
 /// Wait for AcquisitionStart to hit the fake's register, then emit a frame.
@@ -126,7 +139,11 @@ fn snapshot_session_snaps_on_demand() {
     let mut cfg = telegenic::StreamConfig::new(0);
     cfg.packet_size = PacketSize::Fixed(536);
     let mut session = cam.snapshot_session(cfg).expect("open session");
-    assert_eq!(fake.read_reg(0x200C), 1, "session must switch to SingleFrame");
+    assert_eq!(
+        fake.read_reg(0x200C),
+        1,
+        "session must switch to SingleFrame"
+    );
     assert_eq!(fake.read_reg(0x2008), 0, "camera must stay idle until snap");
 
     let payload: Vec<u8> = (0..2000u32).map(|i| i as u8).collect();
@@ -161,12 +178,15 @@ fn snap_grabs_one_frame_and_tears_down() {
 
     assert_eq!(fake.read_reg(0x200C), 0, "AcquisitionMode must be restored");
     let deadline = std::time::Instant::now() + Duration::from_secs(1);
-    while fake.read_reg(bootstrap::STREAM_CHANNEL_PORT) != 0
-        && std::time::Instant::now() < deadline
+    while fake.read_reg(bootstrap::STREAM_CHANNEL_PORT) != 0 && std::time::Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(fake.read_reg(bootstrap::STREAM_CHANNEL_PORT), 0, "stream channel must close");
+    assert_eq!(
+        fake.read_reg(bootstrap::STREAM_CHANNEL_PORT),
+        0,
+        "stream channel must close"
+    );
 }
 
 #[test]

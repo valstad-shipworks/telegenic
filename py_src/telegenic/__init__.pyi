@@ -45,16 +45,13 @@ __all__ = [
     "discover",
 ]
 
-
 class CameraError(RuntimeError):
     """Raised when the transport link fails: connect/acknowledge timeout,
     I/O error, device NAK, lost control, or a malformed packet."""
 
-
 class GenicamError(RuntimeError):
     """Raised by the GenICam feature layer: unknown feature, wrong type or
     access mode, value out of range, or a broken device description."""
-
 
 @final
 class AccessMode(enum.Enum):
@@ -63,7 +60,6 @@ class AccessMode(enum.Enum):
     RO = ...
     WO = ...
     RW = ...
-
 
 @final
 class FrameStatus(enum.Enum):
@@ -83,7 +79,6 @@ class FrameStatus(enum.Enum):
     """A packet id outside the expected range was seen."""
     PayloadUnsupported = ...
     """The payload type cannot be reassembled by this receiver."""
-
 
 @final
 class Camera:
@@ -135,7 +130,6 @@ class Camera:
         model is dropped with the connection; :meth:`connect` reloads it."""
 
     def is_connected(self) -> bool: ...
-
     def device_info(self) -> DeviceInfo:
         """Identity read from the bootstrap registers at connect."""
 
@@ -147,42 +141,28 @@ class Camera:
         register/computation nodes behind them)."""
 
     def has_feature(self, name: str) -> bool: ...
-
     def get_integer(self, name: str) -> int: ...
-
     def set_integer(self, name: str, value: int) -> None: ...
-
     def integer_bounds(self, name: str) -> tuple[int, int]:
         """``(min, max)`` of an integer feature."""
 
     def integer_increment(self, name: str) -> int: ...
-
     def get_float(self, name: str) -> float: ...
-
     def set_float(self, name: str, value: float) -> None: ...
-
     def float_bounds(self, name: str) -> tuple[float, float]: ...
-
     def get_boolean(self, name: str) -> bool: ...
-
     def set_boolean(self, name: str, value: bool) -> None: ...
-
     def get_string(self, name: str) -> str: ...
-
     def set_string(self, name: str, value: str) -> None: ...
-
     def get_enum(self, name: str) -> str:
         """Current entry name of an enumeration feature."""
 
     def set_enum(self, name: str, entry: str) -> None: ...
-
     def enum_entries(self, name: str) -> list[str]: ...
-
     def execute(self, name: str) -> None:
         """Execute a command feature (e.g. ``"AcquisitionStart"``)."""
 
     def access_mode(self, name: str) -> AccessMode: ...
-
     def invalidate_caches(self) -> None:
         """Drop every cached register value, forcing fresh reads."""
 
@@ -247,7 +227,6 @@ class Camera:
         ``AcquisitionMode`` to ``SingleFrame`` when the device offers it
         (restored when the session closes)."""
 
-
 @final
 class SnapshotSession:
     """An open stream channel dedicated to single-frame capture.
@@ -269,20 +248,16 @@ class SnapshotSession:
         """
 
     def stats(self) -> StreamStats: ...
-
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
 
     def is_closed(self) -> bool: ...
-
     def close(self) -> None:
         """Restore ``AcquisitionMode``, unlock transport parameters, and
         close the stream channel. Idempotent."""
 
     def __enter__(self) -> SnapshotSession: ...
-
     def __exit__(self, *args: object) -> bool: ...
-
 
 @final
 class StreamChannel:
@@ -297,7 +272,6 @@ class StreamChannel:
         :attr:`StreamStats.frames_dropped`."""
 
     def stats(self) -> StreamStats: ...
-
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
 
@@ -305,7 +279,6 @@ class StreamChannel:
         """Where the device sends this stream, as ``ip:port``."""
 
     def is_running(self) -> bool: ...
-
 
 @final
 class FrameChannel:
@@ -316,7 +289,6 @@ class FrameChannel:
         """Block until a frame is buffered or ``timeout`` seconds elapse."""
 
     def try_recv(self) -> Frame | None: ...
-
     def recv_all(self) -> list[Frame]:
         """Drain and return every buffered frame."""
 
@@ -325,9 +297,7 @@ class FrameChannel:
         freshly acquired frame instead of a stale one."""
 
     def __iter__(self) -> Iterator[Frame]: ...
-
     def __next__(self) -> Frame: ...
-
 
 @final
 class Frame:
@@ -362,7 +332,6 @@ class Frame:
         incomplete frame the holes read as stale buffer content — check
         :attr:`status` first."""
 
-
 @final
 class StreamStats:
     """Stream receiver counters, all monotonic since stream open."""
@@ -389,7 +358,6 @@ class StreamStats:
     """Completed frames a subscriber could not take (its channel was
     full)."""
 
-
 @final
 class LinkStats:
     """Control-channel counters."""
@@ -403,7 +371,6 @@ class LinkStats:
     heartbeats: int
     events: int
     unsolicited: int
-
 
 @final
 class DeviceInfo:
@@ -422,7 +389,6 @@ class DeviceInfo:
     """Colon-separated hex, e.g. ``"00:11:1c:aa:bb:cc"``."""
     spec_version: tuple[int, int]
     """GigE Vision spec version as ``(major, minor)``."""
-
 
 def discover(timeout: float = 1.0) -> list[DeviceInfo]:
     """Broadcast a GigE Vision discovery beacon on every Up IPv4 adapter

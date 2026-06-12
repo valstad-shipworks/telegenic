@@ -139,7 +139,8 @@ impl ImageLeader {
                 .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
         };
         let u16_at = |i: usize| {
-            data.get(i..i + 2).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
+            data.get(i..i + 2)
+                .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
         };
         Some(Self {
             payload_type,

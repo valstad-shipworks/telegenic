@@ -19,7 +19,10 @@ fn main() {
     cam.connect().expect("connect");
     {
         let info = cam.transport().device_info().expect("device info");
-        println!("{} {} (serial {})", info.manufacturer, info.model, info.serial);
+        println!(
+            "{} {} (serial {})",
+            info.manufacturer, info.model, info.serial
+        );
     }
 
     for feature in ["Width", "Height", "PayloadSize"] {
@@ -42,7 +45,11 @@ fn main() {
     let stream = cam
         .start_acquisition(StreamConfig::new(0))
         .expect("start acquisition");
-    println!("streaming to {} with packet size {}", stream.local_addr(), stream.packet_size());
+    println!(
+        "streaming to {} with packet size {}",
+        stream.local_addr(),
+        stream.packet_size()
+    );
     let frames = stream.subscribe(16);
 
     let mut received = 0usize;

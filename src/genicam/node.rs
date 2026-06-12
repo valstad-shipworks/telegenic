@@ -84,8 +84,15 @@ pub(crate) struct RegisterCommon {
 #[derive(Debug, Clone)]
 pub(crate) enum RegKind {
     Raw,
-    Int { sign: Sign, endianness: Endianness, lsb: Option<u32>, msb: Option<u32> },
-    Float { endianness: Endianness },
+    Int {
+        sign: Sign,
+        endianness: Endianness,
+        lsb: Option<u32>,
+        msb: Option<u32>,
+    },
+    Float {
+        endianness: Endianness,
+    },
     Text,
 }
 
@@ -97,23 +104,59 @@ pub(crate) struct FormulaSlot {
 
 impl FormulaSlot {
     pub fn new(src: String) -> Self {
-        Self { src, compiled: None }
+        Self {
+            src,
+            compiled: None,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Node {
-    Category { features: Vec<Link> },
-    Integer { value: ValueRef, min: ValueRef, max: ValueRef, inc: ValueRef },
-    Float { value: ValueRef, min: ValueRef, max: ValueRef },
-    Boolean { value: ValueRef, on_value: i64, off_value: i64 },
-    StringFeat { value: ValueRef },
-    Enumeration { value: ValueRef, entries: Vec<(String, i64)> },
-    Command { value: ValueRef, command_value: ValueRef },
-    Register { common: RegisterCommon, kind: RegKind },
-    Converter { value: ValueRef, formula_to: FormulaSlot, formula_from: FormulaSlot,
-                variables: Vec<(String, Link)> },
-    SwissKnife { formula: FormulaSlot, variables: Vec<(String, Link)> },
+    Category {
+        features: Vec<Link>,
+    },
+    Integer {
+        value: ValueRef,
+        min: ValueRef,
+        max: ValueRef,
+        inc: ValueRef,
+    },
+    Float {
+        value: ValueRef,
+        min: ValueRef,
+        max: ValueRef,
+    },
+    Boolean {
+        value: ValueRef,
+        on_value: i64,
+        off_value: i64,
+    },
+    StringFeat {
+        value: ValueRef,
+    },
+    Enumeration {
+        value: ValueRef,
+        entries: Vec<(String, i64)>,
+    },
+    Command {
+        value: ValueRef,
+        command_value: ValueRef,
+    },
+    Register {
+        common: RegisterCommon,
+        kind: RegKind,
+    },
+    Converter {
+        value: ValueRef,
+        formula_to: FormulaSlot,
+        formula_from: FormulaSlot,
+        variables: Vec<(String, Link)>,
+    },
+    SwissKnife {
+        formula: FormulaSlot,
+        variables: Vec<(String, Link)>,
+    },
     Port,
 }
 
@@ -133,7 +176,9 @@ pub struct Genicam {
 
 impl std::fmt::Debug for Genicam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Genicam").field("nodes", &self.nodes.len()).finish()
+        f.debug_struct("Genicam")
+            .field("nodes", &self.nodes.len())
+            .finish()
     }
 }
 
@@ -143,7 +188,12 @@ impl Genicam {
         by_name: HashMap<Box<str>, NodeId>,
         invalidates: HashMap<u32, Vec<NodeId>>,
     ) -> Self {
-        Self { nodes, by_name, invalidates, visit: Vec::new() }
+        Self {
+            nodes,
+            by_name,
+            invalidates,
+            visit: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -239,17 +289,36 @@ impl Genicam {
             Node::Integer { value, .. }
             | Node::Boolean { value, .. }
             | Node::Enumeration { value, .. } => self.ref_int(&value, port),
-            Node::Register { kind: RegKind::Int { sign, endianness, lsb, msb }, .. } => {
+            Node::Register {
+                kind:
+                    RegKind::Int {
+                        sign,
+                        endianness,
+                        lsb,
+                        msb,
+                    },
+                ..
+            } => {
                 let bytes = self.register_read(id, port)?;
                 extract_int(&bytes, sign, endianness, lsb, msb)
                     .map_err(|e| GenicamError::Formula(self.name_of(id).to_string(), e))
             }
-            Node::Converter { value, mut formula_from, variables, .. } => {
-                let v = self.eval_converter(id, &value, &mut formula_from, &variables, None, port)?;
+            Node::Converter {
+                value,
+                mut formula_from,
+                variables,
+                ..
+            } => {
+                let v =
+                    self.eval_converter(id, &value, &mut formula_from, &variables, None, port)?;
                 self.store_compiled_from(id, formula_from);
                 Ok(v.as_i64())
             }
-            Node::SwissKnife { mut formula, variables, .. } => {
+            Node::SwissKnife {
+                mut formula,
+                variables,
+                ..
+            } => {
                 let v = self.eval_formula(id, &mut formula, &variables, &[], port)?;
                 self.store_compiled_swissknife(id, formula);
                 Ok(v.as_i64())
@@ -273,7 +342,16 @@ impl Genicam {
             | Node::Boolean { value, .. }
             | Node::Enumeration { value, .. }
             | Node::Command { value, .. } => self.set_ref_int(id, &value, v, port),
-            Node::Register { common, kind: RegKind::Int { sign, endianness, lsb, msb } } => {
+            Node::Register {
+                common,
+                kind:
+                    RegKind::Int {
+                        sign,
+                        endianness,
+                        lsb,
+                        msb,
+                    },
+            } => {
                 let length = self.ref_int(&common.length, port)? as usize;
                 let bytes = if lsb.is_some() || msb.is_some() {
                     // Masked field: read-modify-write the whole register.
@@ -286,7 +364,12 @@ impl Genicam {
                 };
                 self.register_write(id, &bytes, port)
             }
-            Node::Converter { value, mut formula_to, variables, .. } => {
+            Node::Converter {
+                value,
+                mut formula_to,
+                variables,
+                ..
+            } => {
                 let out = self.eval_to(id, &mut formula_to, &variables, Value::I(v), port)?;
                 self.store_compiled_to(id, formula_to);
                 self.set_ref_value(id, &value, out, port)
@@ -295,7 +378,13 @@ impl Genicam {
         }
     }
 
-    fn set_ref_int(&mut self, id: NodeId, vr: &ValueRef, v: i64, port: &dyn PortIo) -> GenicamResult<()> {
+    fn set_ref_int(
+        &mut self,
+        id: NodeId,
+        vr: &ValueRef,
+        v: i64,
+        port: &dyn PortIo,
+    ) -> GenicamResult<()> {
         match vr {
             ValueRef::Link(link) => {
                 let target = self.resolve(link)?;
@@ -317,14 +406,25 @@ impl Genicam {
         }
     }
 
-    fn set_ref_value(&mut self, id: NodeId, vr: &ValueRef, v: Value, port: &dyn PortIo) -> GenicamResult<()> {
+    fn set_ref_value(
+        &mut self,
+        id: NodeId,
+        vr: &ValueRef,
+        v: Value,
+        port: &dyn PortIo,
+    ) -> GenicamResult<()> {
         match vr {
             ValueRef::Link(link) => {
                 let target = self.resolve(link)?;
                 match (&self.nodes[target.0 as usize].node, v) {
-                    (Node::Float { .. } | Node::Register { kind: RegKind::Float { .. }, .. }, v) => {
-                        self.set_float_value(target, v.as_f64(), port)
-                    }
+                    (
+                        Node::Float { .. }
+                        | Node::Register {
+                            kind: RegKind::Float { .. },
+                            ..
+                        },
+                        v,
+                    ) => self.set_float_value(target, v.as_f64(), port),
                     (_, v) => self.set_int_value(target, v.as_i64(), port),
                 }
             }
@@ -344,17 +444,30 @@ impl Genicam {
         match node {
             Node::Float { value, .. } => self.ref_float(&value, port),
             Node::Integer { value, .. } => Ok(self.ref_int(&value, port)? as f64),
-            Node::Register { kind: RegKind::Float { endianness }, .. } => {
+            Node::Register {
+                kind: RegKind::Float { endianness },
+                ..
+            } => {
                 let bytes = self.register_read(id, port)?;
                 extract_float(&bytes, endianness)
                     .map_err(|e| GenicamError::Formula(self.name_of(id).to_string(), e))
             }
-            Node::Converter { value, mut formula_from, variables, .. } => {
-                let v = self.eval_converter(id, &value, &mut formula_from, &variables, None, port)?;
+            Node::Converter {
+                value,
+                mut formula_from,
+                variables,
+                ..
+            } => {
+                let v =
+                    self.eval_converter(id, &value, &mut formula_from, &variables, None, port)?;
                 self.store_compiled_from(id, formula_from);
                 Ok(v.as_f64())
             }
-            Node::SwissKnife { mut formula, variables, .. } => {
+            Node::SwissKnife {
+                mut formula,
+                variables,
+                ..
+            } => {
                 let v = self.eval_formula(id, &mut formula, &variables, &[], port)?;
                 self.store_compiled_swissknife(id, formula);
                 Ok(v.as_f64())
@@ -370,7 +483,12 @@ impl Genicam {
         result
     }
 
-    fn set_float_value_inner(&mut self, id: NodeId, v: f64, port: &dyn PortIo) -> GenicamResult<()> {
+    fn set_float_value_inner(
+        &mut self,
+        id: NodeId,
+        v: f64,
+        port: &dyn PortIo,
+    ) -> GenicamResult<()> {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
             Node::Float { value, .. } => match &value {
@@ -387,13 +505,21 @@ impl Genicam {
                 _ => Err(GenicamError::Access(self.name_of(id).to_string())),
             },
             Node::Integer { .. } => self.set_int_value_inner(id, v.round() as i64, port),
-            Node::Register { common, kind: RegKind::Float { endianness } } => {
+            Node::Register {
+                common,
+                kind: RegKind::Float { endianness },
+            } => {
                 let length = self.ref_int(&common.length, port)? as usize;
                 let bytes = encode_float(v, length, endianness)
                     .map_err(|e| GenicamError::Formula(self.name_of(id).to_string(), e))?;
                 self.register_write(id, &bytes, port)
             }
-            Node::Converter { value, mut formula_to, variables, .. } => {
+            Node::Converter {
+                value,
+                mut formula_to,
+                variables,
+                ..
+            } => {
                 let out = self.eval_to(id, &mut formula_to, &variables, Value::F(v), port)?;
                 self.store_compiled_to(id, formula_to);
                 self.set_ref_value(id, &value, out, port)
@@ -413,7 +539,10 @@ impl Genicam {
                 }
                 _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
             },
-            Node::Register { kind: RegKind::Text, .. } => {
+            Node::Register {
+                kind: RegKind::Text,
+                ..
+            } => {
                 let bytes = self.register_read(id, port)?;
                 let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
                 Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
@@ -428,14 +557,22 @@ impl Genicam {
                     .find(|(_, value)| *value == v)
                     .map(|(name, _)| name.clone())
                     .ok_or_else(|| {
-                        GenicamError::NoSuchEntry(self.name_of(id).to_string(), format!("value {v}"))
+                        GenicamError::NoSuchEntry(
+                            self.name_of(id).to_string(),
+                            format!("value {v}"),
+                        )
                     })
             }
             _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
         }
     }
 
-    pub fn set_string_value(&mut self, id: NodeId, s: &str, port: &dyn PortIo) -> GenicamResult<()> {
+    pub fn set_string_value(
+        &mut self,
+        id: NodeId,
+        s: &str,
+        port: &dyn PortIo,
+    ) -> GenicamResult<()> {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
             Node::StringFeat { value } => match &value {
@@ -451,7 +588,10 @@ impl Genicam {
                 }
                 _ => Err(GenicamError::Access(self.name_of(id).to_string())),
             },
-            Node::Register { common, kind: RegKind::Text } => {
+            Node::Register {
+                common,
+                kind: RegKind::Text,
+            } => {
                 let length = self.ref_int(&common.length, port)? as usize;
                 let mut bytes = vec![0u8; length];
                 let n = s.len().min(length);
@@ -472,7 +612,12 @@ impl Genicam {
         }
     }
 
-    pub fn set_enum_entry(&mut self, id: NodeId, entry: &str, port: &dyn PortIo) -> GenicamResult<()> {
+    pub fn set_enum_entry(
+        &mut self,
+        id: NodeId,
+        entry: &str,
+        port: &dyn PortIo,
+    ) -> GenicamResult<()> {
         let value = match &self.nodes[id.0 as usize].node {
             Node::Enumeration { entries, .. } => entries
                 .iter()
@@ -489,7 +634,10 @@ impl Genicam {
     pub fn execute(&mut self, id: NodeId, port: &dyn PortIo) -> GenicamResult<()> {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
-            Node::Command { value, command_value } => {
+            Node::Command {
+                value,
+                command_value,
+            } => {
                 let v = if command_value.is_none() {
                     1
                 } else {
@@ -505,11 +653,22 @@ impl Genicam {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
             Node::Integer { min, max, .. } => {
-                let lo = if min.is_none() { i64::MIN } else { self.ref_int(&min, port)? };
-                let hi = if max.is_none() { i64::MAX } else { self.ref_int(&max, port)? };
+                let lo = if min.is_none() {
+                    i64::MIN
+                } else {
+                    self.ref_int(&min, port)?
+                };
+                let hi = if max.is_none() {
+                    i64::MAX
+                } else {
+                    self.ref_int(&max, port)?
+                };
                 Ok((lo, hi))
             }
-            Node::Register { kind: RegKind::Int { .. }, .. } => Ok((i64::MIN, i64::MAX)),
+            Node::Register {
+                kind: RegKind::Int { .. },
+                ..
+            } => Ok((i64::MIN, i64::MAX)),
             _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
         }
     }
@@ -518,7 +677,11 @@ impl Genicam {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
             Node::Integer { inc, .. } => {
-                if inc.is_none() { Ok(1) } else { self.ref_int(&inc, port) }
+                if inc.is_none() {
+                    Ok(1)
+                } else {
+                    self.ref_int(&inc, port)
+                }
             }
             _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
         }
@@ -528,8 +691,16 @@ impl Genicam {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
             Node::Float { min, max, .. } => {
-                let lo = if min.is_none() { f64::MIN } else { self.ref_float(&min, port)? };
-                let hi = if max.is_none() { f64::MAX } else { self.ref_float(&max, port)? };
+                let lo = if min.is_none() {
+                    f64::MIN
+                } else {
+                    self.ref_float(&min, port)?
+                };
+                let hi = if max.is_none() {
+                    f64::MAX
+                } else {
+                    self.ref_float(&max, port)?
+                };
                 Ok((lo, hi))
             }
             _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
@@ -539,9 +710,9 @@ impl Genicam {
     pub fn bool_value(&mut self, id: NodeId, port: &dyn PortIo) -> GenicamResult<bool> {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
-            Node::Boolean { value, on_value, .. } => {
-                Ok(self.ref_int(&value, port)? == on_value)
-            }
+            Node::Boolean {
+                value, on_value, ..
+            } => Ok(self.ref_int(&value, port)? == on_value),
             _ => Ok(self.int_value(id, port)? != 0),
         }
     }
@@ -549,9 +720,11 @@ impl Genicam {
     pub fn set_bool_value(&mut self, id: NodeId, v: bool, port: &dyn PortIo) -> GenicamResult<()> {
         let node = self.nodes[id.0 as usize].node.clone();
         match node {
-            Node::Boolean { on_value, off_value, .. } => {
-                self.set_int_value(id, if v { on_value } else { off_value }, port)
-            }
+            Node::Boolean {
+                on_value,
+                off_value,
+                ..
+            } => self.set_int_value(id, if v { on_value } else { off_value }, port),
             _ => self.set_int_value(id, i64::from(v), port),
         }
     }
@@ -587,9 +760,11 @@ impl Genicam {
             ValueRef::Link(link) => {
                 let target = self.resolve(link)?;
                 match &self.nodes[target.0 as usize].node {
-                    Node::Float { .. } | Node::Register { kind: RegKind::Float { .. }, .. } => {
-                        Value::F(self.float_value(target, port)?)
-                    }
+                    Node::Float { .. }
+                    | Node::Register {
+                        kind: RegKind::Float { .. },
+                        ..
+                    } => Value::F(self.float_value(target, port)?),
                     _ => Value::I(self.int_value(target, port)?),
                 }
             }
@@ -622,7 +797,9 @@ impl Genicam {
                 .map_err(|e| GenicamError::Formula(self.name_of(id).to_string(), e))?;
             formula.compiled = Some(expr);
         }
-        let Some(expr) = &formula.compiled else { unreachable!() };
+        let Some(expr) = &formula.compiled else {
+            unreachable!()
+        };
         let expr = expr.clone();
 
         let mut values = Vec::with_capacity(expr.variables().len());
@@ -645,9 +822,11 @@ impl Genicam {
                 })?;
             let target = self.resolve(&link)?;
             let v = match &self.nodes[target.0 as usize].node {
-                Node::Float { .. } | Node::Register { kind: RegKind::Float { .. }, .. } => {
-                    Value::F(self.float_value(target, port)?)
-                }
+                Node::Float { .. }
+                | Node::Register {
+                    kind: RegKind::Float { .. },
+                    ..
+                } => Value::F(self.float_value(target, port)?),
                 _ => Value::I(self.int_value(target, port)?),
             };
             values.push(v);
@@ -682,7 +861,11 @@ impl Genicam {
         for term in &common.address_terms {
             address = address.wrapping_add(self.ref_int(term, port)?);
         }
-        let length = if common.length.is_none() { 4 } else { self.ref_int(&common.length, port)? };
+        let length = if common.length.is_none() {
+            4
+        } else {
+            self.ref_int(&common.length, port)?
+        };
         Ok((address as u64, length as usize))
     }
 
@@ -759,9 +942,7 @@ fn extract_int(
     let bits = 8 * length as u32;
     let (lsb, msb) = match (register_lsb, register_msb, endianness) {
         (None, None, _) => (0, bits - 1),
-        (lsb, msb, Endianness::Little) => {
-            (lsb.unwrap_or(0), msb.unwrap_or(lsb.unwrap_or(0)))
-        }
+        (lsb, msb, Endianness::Little) => (lsb.unwrap_or(0), msb.unwrap_or(lsb.unwrap_or(0))),
         (lsb, msb, Endianness::Big) => {
             let l = lsb.or(msb).unwrap_or(0);
             let m = msb.or(lsb).unwrap_or(0);
@@ -773,7 +954,11 @@ fn extract_int(
     }
 
     let width = msb - lsb + 1;
-    let mask = if width >= 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        ((1u64 << width) - 1) << lsb
+    };
     value = (value & mask) >> lsb;
     if sign == Sign::Signed && width < 64 && value & (1u64 << (width - 1)) != 0 {
         value |= u64::MAX ^ (mask >> lsb);
@@ -809,7 +994,11 @@ fn insert_int(
         return Err(format!("bad bit range {lsb}..{msb} for {length} bytes"));
     }
     let width = msb - lsb + 1;
-    let mask = if width >= 64 { u64::MAX } else { ((1u64 << width) - 1) << lsb };
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        ((1u64 << width) - 1) << lsb
+    };
     value = (value & !mask) | (((v as u64) << lsb) & mask);
     Ok(store_u64(value, length, endianness))
 }
@@ -887,7 +1076,14 @@ mod tests {
     #[test]
     fn masked_little_endian() {
         let bytes = 0xab_cdu16.to_le_bytes();
-        let v = extract_int(&bytes, Sign::Unsigned, Endianness::Little, Some(8), Some(15)).unwrap();
+        let v = extract_int(
+            &bytes,
+            Sign::Unsigned,
+            Endianness::Little,
+            Some(8),
+            Some(15),
+        )
+        .unwrap();
         assert_eq!(v, 0xab);
     }
 
@@ -903,7 +1099,15 @@ mod tests {
     #[test]
     fn insert_preserves_other_bits() {
         let current = 0xffff_0000u32.to_be_bytes();
-        let out = insert_int(&current, 0x12, Sign::Unsigned, Endianness::Big, Some(31), Some(16)).unwrap();
+        let out = insert_int(
+            &current,
+            0x12,
+            Sign::Unsigned,
+            Endianness::Big,
+            Some(31),
+            Some(16),
+        )
+        .unwrap();
         assert_eq!(u32::from_be_bytes(out.try_into().unwrap()), 0xffff_0012);
     }
 

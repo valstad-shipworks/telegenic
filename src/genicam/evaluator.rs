@@ -133,7 +133,8 @@ impl Expr {
                 i += 1;
                 continue;
             }
-            if c.is_ascii_digit() || (c == '.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+            if c.is_ascii_digit() || (c == '.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+            {
                 let (value, len) = parse_number(&src[i..])?;
                 output.push(value);
                 i += len;
@@ -157,10 +158,11 @@ impl Expr {
                         "PI" => output.push(Op::ConstF(std::f64::consts::PI)),
                         "E" => output.push(Op::ConstF(std::f64::consts::E)),
                         name => {
-                            let index = variables.iter().position(|v| v == name).unwrap_or_else(|| {
-                                variables.push(name.to_string());
-                                variables.len() - 1
-                            });
+                            let index =
+                                variables.iter().position(|v| v == name).unwrap_or_else(|| {
+                                    variables.push(name.to_string());
+                                    variables.len() - 1
+                                });
                             output.push(Op::Var(index as u16));
                         }
                     }
@@ -228,7 +230,10 @@ impl Expr {
                 None => return Err("unbalanced parenthesis".into()),
             }
         }
-        Ok(Self { rpn: output, variables })
+        Ok(Self {
+            rpn: output,
+            variables,
+        })
     }
 
     /// Evaluate with `vars` matching [`variables`](Self::variables) by index.
@@ -238,11 +243,9 @@ impl Expr {
             match op {
                 Op::ConstI(v) => stack.push(Value::I(v)),
                 Op::ConstF(v) => stack.push(Value::F(v)),
-                Op::Var(i) => stack.push(
-                    *vars
-                        .get(usize::from(i))
-                        .ok_or_else(|| format!("variable '{}' unbound", self.variables[usize::from(i)]))?,
-                ),
+                Op::Var(i) => stack.push(*vars.get(usize::from(i)).ok_or_else(|| {
+                    format!("variable '{}' unbound", self.variables[usize::from(i)])
+                })?),
                 Op::TernaryColon => {}
                 Op::Ternary => {
                     let c = pop(&mut stack)?;
@@ -264,7 +267,9 @@ impl Expr {
 }
 
 fn pop(stack: &mut Vec<Value>) -> Result<Value, String> {
-    stack.pop().ok_or_else(|| "expression stack underflow".into())
+    stack
+        .pop()
+        .ok_or_else(|| "expression stack underflow".into())
 }
 
 fn apply(op: Op, stack: &mut Vec<Value>) -> Result<Value, String> {
@@ -445,8 +450,8 @@ fn parse_number(src: &str) -> Result<(Op, usize), String> {
             .iter()
             .position(|b| !b.is_ascii_hexdigit())
             .map_or(src.len(), |p| p + 2);
-        let value = i64::from_str_radix(&src[2..end], 16)
-            .map_err(|e| format!("bad hex literal: {e}"))?;
+        let value =
+            i64::from_str_radix(&src[2..end], 16).map_err(|e| format!("bad hex literal: {e}"))?;
         return Ok((Op::ConstI(value), end));
     }
     let mut end = 0;
@@ -471,10 +476,14 @@ fn parse_number(src: &str) -> Result<(Op, usize), String> {
         }
     }
     if is_float {
-        let value: f64 = src[..end].parse().map_err(|e| format!("bad float literal: {e}"))?;
+        let value: f64 = src[..end]
+            .parse()
+            .map_err(|e| format!("bad float literal: {e}"))?;
         Ok((Op::ConstF(value), end))
     } else {
-        let value: i64 = src[..end].parse().map_err(|e| format!("bad int literal: {e}"))?;
+        let value: i64 = src[..end]
+            .parse()
+            .map_err(|e| format!("bad int literal: {e}"))?;
         Ok((Op::ConstI(value), end))
     }
 }

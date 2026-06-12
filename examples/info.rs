@@ -4,8 +4,8 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use telegenic::gige::proto::bootstrap;
 use telegenic::gige::GigECamera;
+use telegenic::gige::proto::bootstrap;
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -18,7 +18,10 @@ fn main() {
     let mut cam = GigECamera::new(ip);
     cam.connect().expect("connect");
     let info = cam.device_info().expect("device info").clone();
-    println!("{} {} (serial {}, fw {})", info.manufacturer, info.model, info.serial, info.device_version);
+    println!(
+        "{} {} (serial {}, fw {})",
+        info.manufacturer, info.model, info.serial, info.device_version
+    );
     println!(
         "  GEV {}.{}  capabilities {:#010x}",
         info.spec_version.0,

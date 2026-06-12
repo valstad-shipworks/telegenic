@@ -144,7 +144,9 @@ pub struct GvcpEvent {
 impl GvcpEvent {
     pub(crate) fn parse(command: u16, payload: &[u8]) -> Self {
         let u16_at = |i: usize| {
-            payload.get(i..i + 2).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
+            payload
+                .get(i..i + 2)
+                .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]))
         };
         let timestamp = payload.get(8..16).map_or(0, |b| {
             u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
@@ -242,7 +244,9 @@ impl ControlPort {
         if !self.thread.is_alive() {
             return Err(CameraError::Disconnected);
         }
-        self.to_worker.send(msg).map_err(|_| CameraError::Disconnected)?;
+        self.to_worker
+            .send(msg)
+            .map_err(|_| CameraError::Disconnected)?;
         self.thread.wake().ok();
         Ok(())
     }
@@ -279,10 +283,16 @@ impl ControlPort {
     pub(crate) fn read_memory(&self, addr: u32, len: u32) -> ResponseHandle<Vec<u8>> {
         let handle = ResponseHandle::new();
         if !addr.is_multiple_of(4) {
-            handle.fail(CameraError::Protocol("read address must be 4-byte aligned".into()));
+            handle.fail(CameraError::Protocol(
+                "read address must be 4-byte aligned".into(),
+            ));
             return handle;
         }
-        if let Err(e) = self.send(ToWorker::ReadMem { addr, len, handle: handle.clone() }) {
+        if let Err(e) = self.send(ToWorker::ReadMem {
+            addr,
+            len,
+            handle: handle.clone(),
+        }) {
             handle.fail(e);
         }
         handle
@@ -297,7 +307,11 @@ impl ControlPort {
             ));
             return handle;
         }
-        if let Err(e) = self.send(ToWorker::WriteMem { addr, data, handle: handle.clone() }) {
+        if let Err(e) = self.send(ToWorker::WriteMem {
+            addr,
+            data,
+            handle: handle.clone(),
+        }) {
             handle.fail(e);
         }
         handle
@@ -340,7 +354,11 @@ impl std::fmt::Debug for GigECamera {
             .field("connected", &self.is_connected())
             .field(
                 "model",
-                &self.connection.as_ref().map(|c| c.info.model.as_str()).unwrap_or(""),
+                &self
+                    .connection
+                    .as_ref()
+                    .map(|c| c.info.model.as_str())
+                    .unwrap_or(""),
             )
             .finish()
     }
@@ -354,7 +372,10 @@ impl GigECamera {
 
     /// A disconnected camera with full configuration. No I/O, infallible.
     pub fn with_config(cfg: GigeConfig) -> Self {
-        Self { cfg, connection: None }
+        Self {
+            cfg,
+            connection: None,
+        }
     }
 
     pub fn config(&self) -> &GigeConfig {
@@ -393,7 +414,9 @@ impl GigECamera {
     /// per-connection state. Blocks up to `deadline` for the release write
     /// to go out; [`connect`](Self::connect) redials afterwards.
     pub fn disconnect(&mut self, deadline: Duration) {
-        let Some(conn) = self.connection.take() else { return };
+        let Some(conn) = self.connection.take() else {
+            return;
+        };
         tracing::debug!(addr = %conn.device_addr, "disconnecting");
         let _ = conn.port.send(ToWorker::Shutdown);
         let start = std::time::Instant::now();
@@ -405,7 +428,9 @@ impl GigECamera {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.connection.as_ref().is_some_and(|c| c.thread.is_alive())
+        self.connection
+            .as_ref()
+            .is_some_and(|c| c.thread.is_alive())
     }
 
     fn conn(&self) -> Result<&Connection> {
@@ -494,13 +519,18 @@ impl GigECamera {
             conn.local_addr.ip()
         };
         let IpAddr::V4(host_v4) = ip else {
-            return Err(CameraError::Unsupported("IPv6 message channel destinations"));
+            return Err(CameraError::Unsupported(
+                "IPv6 message channel destinations",
+            ));
         };
         for (addr, value) in [
             (bootstrap::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(host_v4)),
             (bootstrap::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT, 1000),
             (bootstrap::MESSAGE_CHANNEL_RETRY_COUNT, 3),
-            (bootstrap::MESSAGE_CHANNEL_PORT, u32::from(conn.local_addr.port())),
+            (
+                bootstrap::MESSAGE_CHANNEL_PORT,
+                u32::from(conn.local_addr.port()),
+            ),
         ] {
             conn.port
                 .write_register(addr, value)
@@ -556,12 +586,18 @@ impl GigECamera {
         };
         set_receive_buffer(&socket, &cfg);
 
-        port.write_register(bootstrap::STREAM_CHANNEL_DEST_ADDRESS + base, u32::from(host_v4))
-            .wait_timeout(budget)
-            .map_err(unwrap_arc)?;
-        port.write_register(bootstrap::STREAM_CHANNEL_PORT + base, u32::from(bound.port()))
-            .wait_timeout(budget)
-            .map_err(unwrap_arc)?;
+        port.write_register(
+            bootstrap::STREAM_CHANNEL_DEST_ADDRESS + base,
+            u32::from(host_v4),
+        )
+        .wait_timeout(budget)
+        .map_err(unwrap_arc)?;
+        port.write_register(
+            bootstrap::STREAM_CHANNEL_PORT + base,
+            u32::from(bound.port()),
+        )
+        .wait_timeout(budget)
+        .map_err(unwrap_arc)?;
 
         let scps_addr = bootstrap::STREAM_CHANNEL_PACKET_SIZE + base;
         let packet_size = match cfg.packet_size {
@@ -593,7 +629,9 @@ impl GigECamera {
         let resend_enabled = cfg.resend == crate::gige::stream::ResendPolicy::Always
             && conn.capabilities & bootstrap::CAP_PACKET_RESEND != 0;
 
-        let shared = Arc::new(StreamShared { stats: Mutex::new(Default::default()) });
+        let shared = Arc::new(StreamShared {
+            stats: Mutex::new(Default::default()),
+        });
         let (to_worker, rx) = flume::unbounded();
         let channel = cfg.channel;
         let thread = crate::gige::stream::runner::spawn(
@@ -668,7 +706,9 @@ impl GigECamera {
         let Connection { genicam, port, .. } = conn;
         match genicam {
             Some(graph) => Ok((graph, port)),
-            None => Err(crate::error::GenicamError::Xml("feature model not loaded".into())),
+            None => Err(crate::error::GenicamError::Xml(
+                "feature model not loaded".into(),
+            )),
         }
     }
 
@@ -692,7 +732,11 @@ fn establish(cfg: GigeConfig) -> Result<Connection> {
     let budget = port.budget();
 
     let ccp = bootstrap::CCP_CONTROL
-        | if cfg.exclusive { bootstrap::CCP_EXCLUSIVE } else { 0 };
+        | if cfg.exclusive {
+            bootstrap::CCP_EXCLUSIVE
+        } else {
+            0
+        };
     port.write_register(bootstrap::CONTROL_CHANNEL_PRIVILEGE, ccp)
         .wait_timeout(budget)
         .map_err(|e| match &*e {
@@ -748,10 +792,21 @@ fn fetch_device_info(port: &ControlPort) -> Result<DeviceInfo> {
         ])
         .wait_timeout(budget)
         .map_err(unwrap_arc)?;
-    let [version, device_mode, mac_high, mac_low, supported_ip_config, current_ip_config, ip, mask, gateway] =
-        regs[..]
+    let [
+        version,
+        device_mode,
+        mac_high,
+        mac_low,
+        supported_ip_config,
+        current_ip_config,
+        ip,
+        mask,
+        gateway,
+    ] = regs[..]
     else {
-        return Err(CameraError::Protocol("short bootstrap register read".into()));
+        return Err(CameraError::Protocol(
+            "short bootstrap register read".into(),
+        ));
     };
 
     let string_field = |addr: u32, size: usize| -> Result<String> {
@@ -782,12 +837,21 @@ fn fetch_device_info(port: &ControlPort) -> Result<DeviceInfo> {
         ip: ip.into(),
         subnet_mask: mask.into(),
         gateway: gateway.into(),
-        manufacturer: string_field(bootstrap::MANUFACTURER_NAME, bootstrap::MANUFACTURER_NAME_SIZE)?,
+        manufacturer: string_field(
+            bootstrap::MANUFACTURER_NAME,
+            bootstrap::MANUFACTURER_NAME_SIZE,
+        )?,
         model: string_field(bootstrap::MODEL_NAME, bootstrap::MODEL_NAME_SIZE)?,
         device_version: string_field(bootstrap::DEVICE_VERSION, bootstrap::DEVICE_VERSION_SIZE)?,
-        manufacturer_info: string_field(bootstrap::MANUFACTURER_INFO, bootstrap::MANUFACTURER_INFO_SIZE)?,
+        manufacturer_info: string_field(
+            bootstrap::MANUFACTURER_INFO,
+            bootstrap::MANUFACTURER_INFO_SIZE,
+        )?,
         serial: string_field(bootstrap::SERIAL_NUMBER, bootstrap::SERIAL_NUMBER_SIZE)?,
-        user_defined_name: string_field(bootstrap::USER_DEFINED_NAME, bootstrap::USER_DEFINED_NAME_SIZE)?,
+        user_defined_name: string_field(
+            bootstrap::USER_DEFINED_NAME,
+            bootstrap::USER_DEFINED_NAME_SIZE,
+        )?,
     })
 }
 
@@ -844,15 +908,18 @@ fn negotiate_packet_size(
     const MAX: u16 = 9152;
 
     let budget = port.budget();
-    socket.set_read_timeout(Some(Duration::from_millis(25))).ok();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(25)))
+        .ok();
     let mut buf = vec![0u8; 0x10000];
     // Returns the SCPS-equivalent size of the test packet the device
     // managed to deliver, if any.
     let mut probe = |size: u16| -> Option<u16> {
-        let value = u32::from(size)
-            | bootstrap::SCPS_FIRE_TEST_PACKET
-            | bootstrap::SCPS_DO_NOT_FRAGMENT;
-        port.write_register(scps_addr, value).wait_timeout(budget).ok()?;
+        let value =
+            u32::from(size) | bootstrap::SCPS_FIRE_TEST_PACKET | bootstrap::SCPS_DO_NOT_FRAGMENT;
+        port.write_register(scps_addr, value)
+            .wait_timeout(budget)
+            .ok()?;
         let mut achieved = None;
         for _ in 0..3 {
             match socket.recv_from(&mut buf) {
@@ -877,16 +944,13 @@ fn negotiate_packet_size(
     let size = if let Some(a) = probe(MAX) {
         best = a;
         MAX
-    } else if let Some(mut good) = [1488u16, 1008, MIN]
-        .into_iter()
-        .find(|&c| match probe(c) {
-            Some(a) => {
-                best = best.max(a);
-                true
-            }
-            None => false,
-        })
-    {
+    } else if let Some(mut good) = [1488u16, 1008, MIN].into_iter().find(|&c| match probe(c) {
+        Some(a) => {
+            best = best.max(a);
+            true
+        }
+        None => false,
+    }) {
         let mut bad = MAX;
         while bad - good > INC {
             let mid = good + (bad - good) / 2 / INC * INC;

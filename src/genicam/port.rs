@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use crate::gige::ControlPort;
 use crate::error::{CameraError, Result};
+use crate::gige::ControlPort;
 use crate::handle::unwrap_arc;
 
 pub trait PortIo {
@@ -65,7 +65,9 @@ pub struct MockPort {
 
 impl MockPort {
     pub fn new(size: usize) -> Self {
-        Self { mem: parking_lot::Mutex::new(vec![0u8; size]) }
+        Self {
+            mem: parking_lot::Mutex::new(vec![0u8; size]),
+        }
     }
 
     pub fn set_u32_be(&self, address: u64, value: u32) {
@@ -94,9 +96,9 @@ impl PortIo for MockPort {
     fn write(&self, address: u64, data: &[u8]) -> Result<()> {
         let a = address as usize;
         let mut mem = self.mem.lock();
-        let slice = mem
-            .get_mut(a..a + data.len())
-            .ok_or_else(|| CameraError::Protocol(format!("mock write out of range {address:#x}")))?;
+        let slice = mem.get_mut(a..a + data.len()).ok_or_else(|| {
+            CameraError::Protocol(format!("mock write out of range {address:#x}"))
+        })?;
         slice.copy_from_slice(data);
         Ok(())
     }

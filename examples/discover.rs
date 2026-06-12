@@ -36,7 +36,10 @@ fn main() {
             "{} {} (serial {}, fw {})",
             d.info.manufacturer, d.info.model, d.info.serial, d.info.device_version
         );
-        println!("  ip {}  mask {}  gw {}", d.info.ip, d.info.subnet_mask, d.info.gateway);
+        println!(
+            "  ip {}  mask {}  gw {}",
+            d.info.ip, d.info.subnet_mask, d.info.gateway
+        );
         println!("  mac {mac}  via {} ({})", d.adapter.name, d.adapter.ip);
         println!(
             "  ip config {:#x}  reachable from this subnet: {}",

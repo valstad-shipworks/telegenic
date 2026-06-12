@@ -5,7 +5,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XmlUrl {
     /// The file lives in device memory at `address`.
-    Local { filename: String, address: u64, size: usize },
+    Local {
+        filename: String,
+        address: u64,
+        size: usize,
+    },
     File(String),
     Http(String),
 }
@@ -21,9 +25,12 @@ impl XmlUrl {
             let size = parts.next().ok_or("missing size")?.trim();
             let address =
                 u64::from_str_radix(address, 16).map_err(|e| format!("bad address: {e}"))?;
-            let size =
-                usize::from_str_radix(size, 16).map_err(|e| format!("bad size: {e}"))?;
-            Ok(Self::Local { filename, address, size })
+            let size = usize::from_str_radix(size, 16).map_err(|e| format!("bad size: {e}"))?;
+            Ok(Self::Local {
+                filename,
+                address,
+                size,
+            })
         } else if let Some(rest) = strip_scheme(url, &lower, "file:") {
             // Allow both "File:C:\x.xml" and "file:///path/x.xml".
             Ok(Self::File(rest.trim_start_matches("//").to_string()))
@@ -55,7 +62,8 @@ mod tests {
 
     #[test]
     fn parses_local_zip() {
-        let url = XmlUrl::parse("local:OptoEngineering_Itala_GEV_v3.2.1.zip;FE800000;D967").unwrap();
+        let url =
+            XmlUrl::parse("local:OptoEngineering_Itala_GEV_v3.2.1.zip;FE800000;D967").unwrap();
         assert_eq!(
             url,
             XmlUrl::Local {
@@ -72,15 +80,25 @@ mod tests {
         let url = XmlUrl::parse("Local:camera.xml;10000;1A2B\0\0\0").unwrap();
         assert_eq!(
             url,
-            XmlUrl::Local { filename: "camera.xml".into(), address: 0x10000, size: 0x1A2B }
+            XmlUrl::Local {
+                filename: "camera.xml".into(),
+                address: 0x10000,
+                size: 0x1A2B
+            }
         );
         assert!(!url.is_zip());
     }
 
     #[test]
     fn parses_file_and_http() {
-        assert_eq!(XmlUrl::parse("File:///tmp/cam.xml").unwrap(), XmlUrl::File("/tmp/cam.xml".into()));
-        assert!(matches!(XmlUrl::parse("http://cam/genicam.xml").unwrap(), XmlUrl::Http(_)));
+        assert_eq!(
+            XmlUrl::parse("File:///tmp/cam.xml").unwrap(),
+            XmlUrl::File("/tmp/cam.xml".into())
+        );
+        assert!(matches!(
+            XmlUrl::parse("http://cam/genicam.xml").unwrap(),
+            XmlUrl::Http(_)
+        ));
         assert!(XmlUrl::parse("gopher:whatever").is_err());
     }
 }

@@ -11,8 +11,8 @@ use roxmltree::Node as XmlNode;
 
 use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::node::{
-    AccessMode, Cachable, Endianness, FormulaSlot, Genicam, Link, Node, NodeData, NodeId,
-    RegKind, RegisterCommon, Sign, ValueRef,
+    AccessMode, Cachable, Endianness, FormulaSlot, Genicam, Link, Node, NodeData, NodeId, RegKind,
+    RegisterCommon, Sign, ValueRef,
 };
 
 /// Fallback definitions for standard features some vendor XMLs omit,
@@ -42,7 +42,10 @@ const DEFAULT_NODES: &[(&str, &str)] = &[
 pub fn parse(xml: &str) -> GenicamResult<Genicam> {
     let doc = roxmltree::Document::parse_with_options(
         xml,
-        roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() },
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
     )
     .map_err(|e| GenicamError::Xml(e.to_string()))?;
 
@@ -85,19 +88,19 @@ impl Builder {
     fn push(&mut self, name: String, node: Node) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.by_name.insert(name.clone().into_boxed_str(), id);
-        self.nodes.push(NodeData { name: name.into_boxed_str(), node });
+        self.nodes.push(NodeData {
+            name: name.into_boxed_str(),
+            node,
+        });
         id
     }
 
     fn add_element(&mut self, el: XmlNode<'_, '_>) -> Option<NodeId> {
         let tag = el.tag_name().name();
-        let name = el
-            .attribute("Name")
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                self.anon += 1;
-                format!("__anonymous_{}_{}", tag, self.anon)
-            });
+        let name = el.attribute("Name").map(str::to_string).unwrap_or_else(|| {
+            self.anon += 1;
+            format!("__anonymous_{}_{}", tag, self.anon)
+        });
 
         let node = match tag {
             "Category" => Node::Category {
@@ -139,13 +142,19 @@ impl Builder {
                         Some((entry_name, value))
                     })
                     .collect();
-                Node::Enumeration { value: int_value_ref(el, "Value", "pValue"), entries }
+                Node::Enumeration {
+                    value: int_value_ref(el, "Value", "pValue"),
+                    entries,
+                }
             }
             "Command" => Node::Command {
                 value: int_value_ref(el, "Value", "pValue"),
                 command_value: int_value_ref(el, "CommandValue", "pCommandValue"),
             },
-            "Register" => Node::Register { common: self.register_common(el), kind: RegKind::Raw },
+            "Register" => Node::Register {
+                common: self.register_common(el),
+                kind: RegKind::Raw,
+            },
             "IntReg" => Node::Register {
                 common: self.register_common(el),
                 kind: RegKind::Int {
@@ -161,11 +170,14 @@ impl Builder {
             },
             "FloatReg" => Node::Register {
                 common: self.register_common(el),
-                kind: RegKind::Float { endianness: endianness(el) },
+                kind: RegKind::Float {
+                    endianness: endianness(el),
+                },
             },
-            "StringReg" => {
-                Node::Register { common: self.register_common(el), kind: RegKind::Text }
-            }
+            "StringReg" => Node::Register {
+                common: self.register_common(el),
+                kind: RegKind::Text,
+            },
             "StructReg" => {
                 // Each StructEntry becomes its own masked register sharing
                 // the parent's address block.
@@ -175,13 +187,20 @@ impl Builder {
                     .children()
                     .filter(|c| c.is_element() && c.tag_name().name() == "StructEntry")
                 {
-                    let Some(entry_name) = entry.attribute("Name") else { continue };
+                    let Some(entry_name) = entry.attribute("Name") else {
+                        continue;
+                    };
                     let mut entry_common = common.clone();
                     if let Some(mode) = access_mode(entry) {
                         entry_common.access = mode;
                     }
                     let mut kind = masked_int_kind(entry);
-                    if let RegKind::Int { endianness: e, sign: s, .. } = &mut kind {
+                    if let RegKind::Int {
+                        endianness: e,
+                        sign: s,
+                        ..
+                    } = &mut kind
+                    {
                         if entry.children().all(|c| c.tag_name().name() != "Endianess") {
                             *e = parent_endianness;
                         }
@@ -191,7 +210,10 @@ impl Builder {
                     }
                     let id = self.push(
                         entry_name.to_string(),
-                        Node::Register { common: entry_common, kind },
+                        Node::Register {
+                            common: entry_common,
+                            kind,
+                        },
                     );
                     self.collect_invalidators(id, entry);
                 }
@@ -220,7 +242,10 @@ impl Builder {
     }
 
     fn collect_invalidators(&mut self, id: NodeId, el: XmlNode<'_, '_>) {
-        let names: Vec<String> = texts(el, "pInvalidator").into_iter().map(str::to_string).collect();
+        let names: Vec<String> = texts(el, "pInvalidator")
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         if !names.is_empty() {
             self.invalidators.push((id, names));
         }
@@ -259,7 +284,12 @@ impl Builder {
     }
 
     fn finish(self) -> Genicam {
-        let Builder { mut nodes, by_name, invalidators, .. } = self;
+        let Builder {
+            mut nodes,
+            by_name,
+            invalidators,
+            ..
+        } = self;
 
         let resolve = |link: &mut Link| {
             if let Link::Name(name) = link
@@ -277,7 +307,12 @@ impl Builder {
         for data in &mut nodes {
             match &mut data.node {
                 Node::Category { features } => features.iter_mut().for_each(resolve),
-                Node::Integer { value, min, max, inc } => {
+                Node::Integer {
+                    value,
+                    min,
+                    max,
+                    inc,
+                } => {
                     [value, min, max, inc].into_iter().for_each(resolve_ref);
                 }
                 Node::Float { value, min, max } => {
@@ -286,14 +321,19 @@ impl Builder {
                 Node::Boolean { value, .. }
                 | Node::StringFeat { value }
                 | Node::Enumeration { value, .. } => resolve_ref(value),
-                Node::Command { value, command_value } => {
+                Node::Command {
+                    value,
+                    command_value,
+                } => {
                     [value, command_value].into_iter().for_each(resolve_ref);
                 }
                 Node::Register { common, .. } => {
                     common.address_terms.iter_mut().for_each(resolve_ref);
                     resolve_ref(&mut common.length);
                 }
-                Node::Converter { value, variables, .. } => {
+                Node::Converter {
+                    value, variables, ..
+                } => {
                     resolve_ref(value);
                     variables.iter_mut().for_each(|(_, link)| resolve(link));
                 }
@@ -415,5 +455,10 @@ fn masked_int_kind(el: XmlNode<'_, '_>) -> RegKind {
     let bit = int_text(el, "Bit").map(|v| v as u32);
     let lsb = int_text(el, "LSB").map(|v| v as u32).or(bit);
     let msb = int_text(el, "MSB").map(|v| v as u32).or(bit);
-    RegKind::Int { sign: sign(el), endianness: endianness(el), lsb, msb }
+    RegKind::Int {
+        sign: sign(el),
+        endianness: endianness(el),
+        lsb,
+        msb,
+    }
 }

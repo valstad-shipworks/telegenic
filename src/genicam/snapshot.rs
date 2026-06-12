@@ -69,7 +69,13 @@ impl<'a> SnapshotSession<'a> {
             tracing::debug!("TLParamsLocked not set: {e}");
         }
         let frames = stream.subscribe(4);
-        Ok(Self { cam, stream, frames, auto_stops, restore_mode })
+        Ok(Self {
+            cam,
+            stream,
+            frames,
+            auto_stops,
+            restore_mode,
+        })
     }
 
     /// Arm the camera, wait for the resulting frame, and leave the camera

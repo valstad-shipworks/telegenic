@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use fake_camera::FakeCamera;
-use telegenic::gige::proto::bootstrap;
 use telegenic::CameraError;
+use telegenic::gige::proto::bootstrap;
 use telegenic::gige::{GigECamera, GigeConfig, GvcpStatus};
 
 fn config_for(fake: &FakeCamera) -> GigeConfig {
@@ -54,7 +54,10 @@ fn construction_is_free_and_disconnected() {
     let cam = GigECamera::new(std::net::Ipv4Addr::LOCALHOST);
     assert!(!cam.is_connected());
     assert!(matches!(cam.device_info(), Err(CameraError::Disconnected)));
-    assert!(matches!(cam.read_register(0), Err(CameraError::Disconnected)));
+    assert!(matches!(
+        cam.read_register(0),
+        Err(CameraError::Disconnected)
+    ));
     assert!(cam.stats().is_none());
 }
 
@@ -65,7 +68,10 @@ fn reconnect_after_disconnect() {
 
     cam.disconnect(Duration::from_millis(500));
     assert!(!cam.is_connected());
-    assert!(matches!(cam.read_register(0), Err(CameraError::Disconnected)));
+    assert!(matches!(
+        cam.read_register(0),
+        Err(CameraError::Disconnected)
+    ));
 
     cam.connect().expect("reconnect");
     assert!(cam.is_connected());
@@ -97,7 +103,11 @@ fn register_roundtrip() {
         .expect("submit")
         .wait()
         .expect("write register");
-    let value = cam.read_register(0x2000).expect("submit").wait().expect("read register");
+    let value = cam
+        .read_register(0x2000)
+        .expect("submit")
+        .wait()
+        .expect("read register");
     assert_eq!(value, 0xdead_beef);
 
     let values = cam
@@ -138,7 +148,11 @@ fn unaligned_memory_access_fails_fast() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
 
-    let err = cam.read_memory(0x4001, 8).expect("submit").wait().unwrap_err();
+    let err = cam
+        .read_memory(0x4001, 8)
+        .expect("submit")
+        .wait()
+        .unwrap_err();
     assert!(matches!(*err, CameraError::Protocol(_)));
     let err = cam
         .write_memory(0x4000, vec![1, 2, 3])
@@ -160,7 +174,11 @@ fn lost_datagrams_are_retried() {
         .wait()
         .expect("read after retries");
     assert_eq!(value, 0x0002_0000);
-    assert!(cam.stats().expect("stats").retries >= 2, "stats: {:?}", cam.stats());
+    assert!(
+        cam.stats().expect("stats").retries >= 2,
+        "stats: {:?}",
+        cam.stats()
+    );
 }
 
 #[test]
@@ -169,7 +187,11 @@ fn persistent_loss_times_out() {
     let cam = connect(&fake);
 
     fake.knobs().lock().drop_next = 100;
-    let err = cam.read_register(bootstrap::VERSION).expect("submit").wait().unwrap_err();
+    let err = cam
+        .read_register(bootstrap::VERSION)
+        .expect("submit")
+        .wait()
+        .unwrap_err();
     assert!(matches!(*err, CameraError::Timeout), "got {err}");
     assert!(cam.stats().expect("stats").timeouts >= 1);
     fake.knobs().lock().drop_next = 0;
@@ -207,7 +229,11 @@ fn device_nak_maps_to_error() {
     let fake = FakeCamera::start();
     let cam = connect(&fake);
 
-    let err = cam.read_register(0xfff0_0000).expect("submit").wait().unwrap_err();
+    let err = cam
+        .read_register(0xfff0_0000)
+        .expect("submit")
+        .wait()
+        .unwrap_err();
     match &*err {
         CameraError::Nak { status, .. } => assert_eq!(*status, GvcpStatus::INVALID_ADDRESS),
         other => panic!("expected Nak, got {other}"),
@@ -258,7 +284,10 @@ fn heartbeat_keeps_control_and_detects_loss() {
 fn disconnect_releases_control() {
     let fake = FakeCamera::start();
     let mut cam = connect(&fake);
-    assert_eq!(fake.read_reg(bootstrap::CONTROL_CHANNEL_PRIVILEGE), bootstrap::CCP_CONTROL);
+    assert_eq!(
+        fake.read_reg(bootstrap::CONTROL_CHANNEL_PRIVILEGE),
+        bootstrap::CCP_CONTROL
+    );
 
     cam.disconnect(Duration::from_millis(500));
     assert!(!cam.is_connected());

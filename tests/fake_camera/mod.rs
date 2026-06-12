@@ -70,7 +70,10 @@ impl Gvsp {
         if ip == 0 || port == 0 {
             return None;
         }
-        Some(SocketAddr::new(std::net::Ipv4Addr::from(ip).into(), port as u16))
+        Some(SocketAddr::new(
+            std::net::Ipv4Addr::from(ip).into(),
+            port as u16,
+        ))
     }
 
     fn send(&self, mem: &Mutex<Vec<u8>>, datagram: &[u8]) {
@@ -119,20 +122,42 @@ impl FakeCamera {
             })
             .expect("spawn fake camera");
 
-        Self { addr, mem, knobs, counters, gvsp, stop, thread: Some(thread) }
+        Self {
+            addr,
+            mem,
+            knobs,
+            counters,
+            gvsp,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     /// Send one synthetic image frame as GVSP packets to the configured
     /// stream destination, caching every packet for resend replay.
     pub fn send_gvsp_frame(&self, frame_id: u64, payload: &[u8], opts: &FrameOpts) {
         let mut packets: Vec<(u32, Vec<u8>)> = Vec::new();
-        packets.push((0, build_leader(opts.extended_ids, frame_id, opts.width(payload), opts.height)));
+        packets.push((
+            0,
+            build_leader(
+                opts.extended_ids,
+                frame_id,
+                opts.width(payload),
+                opts.height,
+            ),
+        ));
         let blocks = payload.chunks(opts.block_size);
         let n_blocks = blocks.len() as u32;
         for (i, block) in blocks.enumerate() {
-            packets.push((i as u32 + 1, build_payload(opts.extended_ids, frame_id, i as u32 + 1, block)));
+            packets.push((
+                i as u32 + 1,
+                build_payload(opts.extended_ids, frame_id, i as u32 + 1, block),
+            ));
         }
-        packets.push((n_blocks + 1, build_trailer(opts.extended_ids, frame_id, n_blocks + 1)));
+        packets.push((
+            n_blocks + 1,
+            build_trailer(opts.extended_ids, frame_id, n_blocks + 1),
+        ));
 
         {
             let mut cache = self.gvsp.cache.lock();
@@ -189,7 +214,10 @@ impl FakeCamera {
         if self.gvsp.socket.send_to(&pkt, dest).is_err() {
             return false;
         }
-        self.gvsp.socket.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        self.gvsp
+            .socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .ok();
         let mut buf = [0u8; 64];
         while let Ok((n, _)) = self.gvsp.socket.recv_from(&mut buf) {
             if let Some(ack) = gvcp::Ack::parse(&buf[..n])
@@ -386,14 +414,22 @@ fn seed_memory() -> Vec<u8> {
         mem[addr as usize..addr as usize + 4].copy_from_slice(&value.to_be_bytes());
     };
     reg(bootstrap::VERSION, 0x0002_0000); // GEV 2.0
-    reg(bootstrap::GVCP_CAPABILITY,
+    reg(
+        bootstrap::GVCP_CAPABILITY,
         bootstrap::CAP_WRITE_MEMORY
             | bootstrap::CAP_PACKET_RESEND
             | bootstrap::CAP_EVENT
-            | bootstrap::CAP_PENDING_ACK);
+            | bootstrap::CAP_PENDING_ACK,
+    );
     reg(bootstrap::HEARTBEAT_TIMEOUT, 3000);
-    reg(bootstrap::CURRENT_IP_ADDRESS, u32::from(std::net::Ipv4Addr::new(127, 0, 0, 1)));
-    reg(bootstrap::CURRENT_SUBNET_MASK, u32::from(std::net::Ipv4Addr::new(255, 0, 0, 0)));
+    reg(
+        bootstrap::CURRENT_IP_ADDRESS,
+        u32::from(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+    );
+    reg(
+        bootstrap::CURRENT_SUBNET_MASK,
+        u32::from(std::net::Ipv4Addr::new(255, 0, 0, 0)),
+    );
     mem[0x0a..0x10].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]);
     let mut string = |addr: u32, s: &str| {
         mem[addr as usize..addr as usize + s.len()].copy_from_slice(s.as_bytes());
@@ -433,12 +469,22 @@ fn serve(
                 continue;
             }
         }
-        let Some(cmd) = gvcp::Cmd::parse(&buf[..n]) else { continue };
+        let Some(cmd) = gvcp::Cmd::parse(&buf[..n]) else {
+            continue;
+        };
 
         let pending = knobs.lock().pending_ack_delay;
         if let Some(delay) = pending {
             let extension = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX) * 2;
-            let _ = socket.send_to(&ack(gvcp::GvcpStatus::SUCCESS, gvcp::PENDING_ACK, cmd.req_id, &extension.to_be_bytes()), src);
+            let _ = socket.send_to(
+                &ack(
+                    gvcp::GvcpStatus::SUCCESS,
+                    gvcp::PENDING_ACK,
+                    cmd.req_id,
+                    &extension.to_be_bytes(),
+                ),
+                src,
+            );
             std::thread::sleep(delay);
         }
 
@@ -466,10 +512,9 @@ fn handle_cmd(
                     .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
             };
             let (frame_id, first, last) = if extended {
-                let frame = cmd
-                    .payload
-                    .get(12..20)
-                    .map(|b| u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))?;
+                let frame = cmd.payload.get(12..20).map(|b| {
+                    u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+                })?;
                 (frame, u32_at(4)?, u32_at(8)?)
             } else {
                 (u64::from(u32_at(0)? & 0xffff), u32_at(4)?, u32_at(8)?)
@@ -492,7 +537,12 @@ fn handle_cmd(
         }
         gvcp::DISCOVERY_CMD => {
             let block = mem.lock()[..bootstrap::DISCOVERY_DATA_SIZE].to_vec();
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::DISCOVERY_ACK, gvcp::DISCOVERY_ID, &block))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::DISCOVERY_ACK,
+                gvcp::DISCOVERY_ID,
+                &block,
+            ))
         }
         gvcp::FORCEIP_CMD => {
             let mac = cmd.payload.get(2..8)?;
@@ -508,7 +558,12 @@ fn handle_cmd(
             mem[bootstrap::CURRENT_IP_ADDRESS as usize..][..4].copy_from_slice(&ip);
             mem[bootstrap::CURRENT_SUBNET_MASK as usize..][..4].copy_from_slice(&mask);
             mem[bootstrap::CURRENT_GATEWAY as usize..][..4].copy_from_slice(&gw);
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::FORCEIP_ACK, cmd.req_id, &[]))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::FORCEIP_ACK,
+                cmd.req_id,
+                &[],
+            ))
         }
         gvcp::READ_REGISTER_CMD => {
             let mem = mem.lock();
@@ -516,26 +571,46 @@ fn handle_cmd(
             for chunk in cmd.payload.chunks_exact(4) {
                 let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
                 if addr + 4 > mem.len() {
-                    return Some(nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::READ_REGISTER_ACK, cmd.req_id));
+                    return Some(nak(
+                        gvcp::GvcpStatus::INVALID_ADDRESS,
+                        gvcp::READ_REGISTER_ACK,
+                        cmd.req_id,
+                    ));
                 }
                 if addr == bootstrap::CONTROL_CHANNEL_PRIVILEGE as usize {
                     counters.ccp_reads.fetch_add(1, Ordering::Relaxed);
                 }
                 values.extend_from_slice(&mem[addr..addr + 4]);
             }
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::READ_REGISTER_ACK, cmd.req_id, &values))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::READ_REGISTER_ACK,
+                cmd.req_id,
+                &values,
+            ))
         }
         gvcp::WRITE_REGISTER_CMD => {
             let mut fire_test_size = None;
             {
                 let mut mem = mem.lock();
                 for chunk in cmd.payload.chunks_exact(8) {
-                    let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
+                    let addr =
+                        u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
                     if addr + 4 > mem.len() {
-                        return Some(nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::WRITE_REGISTER_ACK, cmd.req_id));
+                        return Some(nak(
+                            gvcp::GvcpStatus::INVALID_ADDRESS,
+                            gvcp::WRITE_REGISTER_ACK,
+                            cmd.req_id,
+                        ));
                     }
-                    if addr == bootstrap::CONTROL_CHANNEL_PRIVILEGE as usize && knobs.lock().deny_control {
-                        return Some(nak(gvcp::GvcpStatus::ACCESS_DENIED, gvcp::WRITE_REGISTER_ACK, cmd.req_id));
+                    if addr == bootstrap::CONTROL_CHANNEL_PRIVILEGE as usize
+                        && knobs.lock().deny_control
+                    {
+                        return Some(nak(
+                            gvcp::GvcpStatus::ACCESS_DENIED,
+                            gvcp::WRITE_REGISTER_ACK,
+                            cmd.req_id,
+                        ));
                     }
                     mem[addr..addr + 4].copy_from_slice(&chunk[4..8]);
 
@@ -554,30 +629,54 @@ fn handle_cmd(
                 gvsp.send(mem, &vec![0u8; usize::from(size) - 28]);
             }
             let written = (cmd.payload.len() / 8) as u32;
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::WRITE_REGISTER_ACK, cmd.req_id, &written.to_be_bytes()))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::WRITE_REGISTER_ACK,
+                cmd.req_id,
+                &written.to_be_bytes(),
+            ))
         }
         gvcp::READ_MEMORY_CMD => {
             let mem = mem.lock();
             let addr = u32::from_be_bytes(cmd.payload.get(..4)?.try_into().ok()?) as usize;
-            let count = u32::from_be_bytes(cmd.payload.get(4..8)?.try_into().ok()?) as usize & 0xffff;
+            let count =
+                u32::from_be_bytes(cmd.payload.get(4..8)?.try_into().ok()?) as usize & 0xffff;
             if addr + count > mem.len() || count > gvcp::DATA_SIZE_MAX {
-                return Some(nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::READ_MEMORY_ACK, cmd.req_id));
+                return Some(nak(
+                    gvcp::GvcpStatus::INVALID_ADDRESS,
+                    gvcp::READ_MEMORY_ACK,
+                    cmd.req_id,
+                ));
             }
             let mut payload = Vec::with_capacity(4 + count);
             payload.extend_from_slice(&(addr as u32).to_be_bytes());
             payload.extend_from_slice(&mem[addr..addr + count]);
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::READ_MEMORY_ACK, cmd.req_id, &payload))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::READ_MEMORY_ACK,
+                cmd.req_id,
+                &payload,
+            ))
         }
         gvcp::WRITE_MEMORY_CMD => {
             let mut mem = mem.lock();
             let addr = u32::from_be_bytes(cmd.payload.get(..4)?.try_into().ok()?) as usize;
             let data = cmd.payload.get(4..)?;
             if addr + data.len() > mem.len() {
-                return Some(nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::WRITE_MEMORY_ACK, cmd.req_id));
+                return Some(nak(
+                    gvcp::GvcpStatus::INVALID_ADDRESS,
+                    gvcp::WRITE_MEMORY_ACK,
+                    cmd.req_id,
+                ));
             }
             mem[addr..addr + data.len()].copy_from_slice(data);
             let index = (data.len() as u32).to_be_bytes();
-            Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::WRITE_MEMORY_ACK, cmd.req_id, &index))
+            Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::WRITE_MEMORY_ACK,
+                cmd.req_id,
+                &index,
+            ))
         }
         _ => None,
     }

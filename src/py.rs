@@ -44,7 +44,8 @@ pyo3::create_exception!(
 );
 
 fn parse_ip(ip: &str) -> PyResult<IpAddr> {
-    ip.parse().map_err(|_| PyValueError::new_err(format!("invalid IP address: {ip:?}")))
+    ip.parse()
+        .map_err(|_| PyValueError::new_err(format!("invalid IP address: {ip:?}")))
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -106,17 +107,24 @@ impl Camera {
         if let Some(local) = local_ip {
             cfg.local_addr = Some(SocketAddr::new(parse_ip(local)?, 0));
         }
-        Ok(Self { inner: Arc::new(Mutex::new(GenICamera::with_config(cfg))) })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(GenICamera::with_config(cfg))),
+        })
     }
 
     #[pyo3(name = "connect")]
     fn py_connect(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.lock().connect()).map_err(Into::into)
+        py.detach(|| self.inner.lock().connect())
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "disconnect", signature = (deadline = 0.5))]
     fn py_disconnect(&self, py: Python<'_>, deadline: f64) {
-        py.detach(|| self.inner.lock().disconnect(Duration::from_secs_f64(deadline)));
+        py.detach(|| {
+            self.inner
+                .lock()
+                .disconnect(Duration::from_secs_f64(deadline))
+        });
     }
 
     #[pyo3(name = "is_connected")]
@@ -146,82 +154,98 @@ impl Camera {
 
     #[pyo3(name = "get_integer")]
     fn py_get_integer(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        py.detach(|| self.inner.lock().get_integer(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().get_integer(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "set_integer")]
     fn py_set_integer(&self, py: Python<'_>, name: &str, value: i64) -> PyResult<()> {
-        py.detach(|| self.inner.lock().set_integer(name, value)).map_err(Into::into)
+        py.detach(|| self.inner.lock().set_integer(name, value))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "integer_bounds")]
     fn py_integer_bounds(&self, py: Python<'_>, name: &str) -> PyResult<(i64, i64)> {
-        py.detach(|| self.inner.lock().integer_bounds(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().integer_bounds(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "integer_increment")]
     fn py_integer_increment(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        py.detach(|| self.inner.lock().integer_increment(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().integer_increment(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "get_float")]
     fn py_get_float(&self, py: Python<'_>, name: &str) -> PyResult<f64> {
-        py.detach(|| self.inner.lock().get_float(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().get_float(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "set_float")]
     fn py_set_float(&self, py: Python<'_>, name: &str, value: f64) -> PyResult<()> {
-        py.detach(|| self.inner.lock().set_float(name, value)).map_err(Into::into)
+        py.detach(|| self.inner.lock().set_float(name, value))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "float_bounds")]
     fn py_float_bounds(&self, py: Python<'_>, name: &str) -> PyResult<(f64, f64)> {
-        py.detach(|| self.inner.lock().float_bounds(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().float_bounds(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "get_boolean")]
     fn py_get_boolean(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        py.detach(|| self.inner.lock().get_boolean(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().get_boolean(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "set_boolean")]
     fn py_set_boolean(&self, py: Python<'_>, name: &str, value: bool) -> PyResult<()> {
-        py.detach(|| self.inner.lock().set_boolean(name, value)).map_err(Into::into)
+        py.detach(|| self.inner.lock().set_boolean(name, value))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "get_string")]
     fn py_get_string(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        py.detach(|| self.inner.lock().get_string(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().get_string(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "set_string")]
     fn py_set_string(&self, py: Python<'_>, name: &str, value: &str) -> PyResult<()> {
-        py.detach(|| self.inner.lock().set_string(name, value)).map_err(Into::into)
+        py.detach(|| self.inner.lock().set_string(name, value))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "get_enum")]
     fn py_get_enum(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        py.detach(|| self.inner.lock().get_enum(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().get_enum(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "set_enum")]
     fn py_set_enum(&self, py: Python<'_>, name: &str, entry: &str) -> PyResult<()> {
-        py.detach(|| self.inner.lock().set_enum(name, entry)).map_err(Into::into)
+        py.detach(|| self.inner.lock().set_enum(name, entry))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "enum_entries")]
     fn py_enum_entries(&self, py: Python<'_>, name: &str) -> PyResult<Vec<String>> {
-        py.detach(|| self.inner.lock().enum_entries(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().enum_entries(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "execute")]
     fn py_execute(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.inner.lock().execute(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().execute(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "access_mode")]
     fn py_access_mode(&self, py: Python<'_>, name: &str) -> PyResult<AccessMode> {
-        py.detach(|| self.inner.lock().access_mode(name)).map_err(Into::into)
+        py.detach(|| self.inner.lock().access_mode(name))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "invalidate_caches")]
@@ -247,12 +271,14 @@ impl Camera {
         resend: bool,
     ) -> PyResult<StreamChannel> {
         let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
-        py.detach(|| self.inner.lock().start_acquisition(cfg)).map_err(Into::into)
+        py.detach(|| self.inner.lock().start_acquisition(cfg))
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "stop_acquisition")]
     fn py_stop_acquisition(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.lock().stop_acquisition()).map_err(Into::into)
+        py.detach(|| self.inner.lock().stop_acquisition())
+            .map_err(Into::into)
     }
 
     #[pyo3(name = "snap", signature = (
@@ -276,8 +302,11 @@ impl Camera {
         resend: bool,
     ) -> PyResult<PyFrame> {
         let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
-        let frame = py
-            .detach(|| self.inner.lock().snap(cfg, Duration::from_secs_f64(timeout)))?;
+        let frame = py.detach(|| {
+            self.inner
+                .lock()
+                .snap(cfg, Duration::from_secs_f64(timeout))
+        })?;
         Ok(PyFrame { inner: frame })
     }
 
@@ -350,8 +379,9 @@ impl SessionState {
 
         if cfg.payload_size == 0 {
             let payload = match cam.get_integer("PayloadSize") {
-                Ok(v) => usize::try_from(v)
-                    .map_err(|_| GenicamError::Xml("negative PayloadSize".into())),
+                Ok(v) => {
+                    usize::try_from(v).map_err(|_| GenicamError::Xml("negative PayloadSize".into()))
+                }
                 Err(e) => Err(e),
             };
             match payload {
@@ -377,7 +407,12 @@ impl SessionState {
             tracing::debug!("TLParamsLocked not set: {e}");
         }
         let frames = stream.subscribe(4);
-        Ok(Self { stream, frames, auto_stops, restore_mode })
+        Ok(Self {
+            stream,
+            frames,
+            auto_stops,
+            restore_mode,
+        })
     }
 
     fn snap(&self, cam: &mut GenICamera, timeout: Duration) -> GenicamResult<Arc<crate::Frame>> {
@@ -482,14 +517,20 @@ impl PySnapshotSession {
     fn __repr__(&self) -> String {
         format!(
             "SnapshotSession(closed={})",
-            if self.state.lock().is_none() { "True" } else { "False" }
+            if self.state.lock().is_none() {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 }
 
 impl Drop for PySnapshotSession {
     fn drop(&mut self) {
-        let Some(state) = self.state.lock().take() else { return };
+        let Some(state) = self.state.lock().take() else {
+            return;
+        };
         // Bounded wait: drop may run with the GIL held while another thread
         // holds the camera inside a detached call; never deadlock here. The
         // stream channel still closes when `state` drops either way.
@@ -660,7 +701,10 @@ impl FrameChannel {
 
     #[pyo3(name = "recv_all")]
     fn py_recv_all(&self) -> Vec<PyFrame> {
-        self.recv_all().into_iter().map(|inner| PyFrame { inner }).collect()
+        self.recv_all()
+            .into_iter()
+            .map(|inner| PyFrame { inner })
+            .collect()
     }
 
     #[pyo3(name = "clear")]

@@ -3,8 +3,8 @@
 
 use std::net::Ipv4Addr;
 
-use zerocopy::byteorder::network_endian::U32;
 use zerocopy::FromBytes;
+use zerocopy::byteorder::network_endian::U32;
 
 pub const VERSION: u32 = 0x0000;
 pub const DEVICE_MODE: u32 = 0x0004;
@@ -130,7 +130,9 @@ impl DeviceInfo {
 
 fn reg(block: &[u8], offset: u32) -> Option<u32> {
     let start = offset as usize;
-    U32::read_from_bytes(block.get(start..start + 4)?).ok().map(|v| v.get())
+    U32::read_from_bytes(block.get(start..start + 4)?)
+        .ok()
+        .map(|v| v.get())
 }
 
 fn ip_reg(block: &[u8], offset: u32) -> Option<Ipv4Addr> {

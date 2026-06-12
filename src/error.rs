@@ -45,7 +45,12 @@ pub enum GenicamError {
     #[error("enumeration '{0}' has no entry '{1}'")]
     NoSuchEntry(String, String),
     #[error("value {value} out of range [{min}, {max}] for '{name}'")]
-    OutOfRange { name: String, value: i64, min: i64, max: i64 },
+    OutOfRange {
+        name: String,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
     #[error("device description: {0}")]
     Xml(String),
     #[error(transparent)]

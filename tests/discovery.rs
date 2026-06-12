@@ -38,7 +38,10 @@ fn discover_finds_fake_camera() {
     assert_eq!(d.info.mac, [0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]);
     assert_eq!(d.info.ip, Ipv4Addr::LOCALHOST);
     assert_eq!(d.from.ip(), std::net::IpAddr::from(Ipv4Addr::LOCALHOST));
-    assert!(discovery::is_reachable(d), "127.0.0.1 is inside 127.0.0.0/8");
+    assert!(
+        discovery::is_reachable(d),
+        "127.0.0.1 is inside 127.0.0.0/8"
+    );
 }
 
 #[test]
@@ -59,9 +62,18 @@ fn force_ip_repoints_the_fake_camera() {
     .expect("force ip");
     assert!(acked, "fake camera should acknowledge");
 
-    assert_eq!(fake.read_reg(bootstrap::CURRENT_IP_ADDRESS), u32::from(Ipv4Addr::new(10, 1, 2, 3)));
-    assert_eq!(fake.read_reg(bootstrap::CURRENT_SUBNET_MASK), u32::from(Ipv4Addr::new(255, 255, 255, 0)));
-    assert_eq!(fake.read_reg(bootstrap::CURRENT_GATEWAY), u32::from(Ipv4Addr::new(10, 1, 2, 1)));
+    assert_eq!(
+        fake.read_reg(bootstrap::CURRENT_IP_ADDRESS),
+        u32::from(Ipv4Addr::new(10, 1, 2, 3))
+    );
+    assert_eq!(
+        fake.read_reg(bootstrap::CURRENT_SUBNET_MASK),
+        u32::from(Ipv4Addr::new(255, 255, 255, 0))
+    );
+    assert_eq!(
+        fake.read_reg(bootstrap::CURRENT_GATEWAY),
+        u32::from(Ipv4Addr::new(10, 1, 2, 1))
+    );
 }
 
 #[test]
@@ -81,5 +93,8 @@ fn force_ip_ignores_other_macs() {
     )
     .expect("force ip");
     assert!(!acked, "wrong MAC must not be acknowledged");
-    assert_eq!(fake.read_reg(bootstrap::CURRENT_IP_ADDRESS), u32::from(Ipv4Addr::LOCALHOST));
+    assert_eq!(
+        fake.read_reg(bootstrap::CURRENT_IP_ADDRESS),
+        u32::from(Ipv4Addr::LOCALHOST)
+    );
 }

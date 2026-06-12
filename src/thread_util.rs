@@ -24,7 +24,10 @@ pub struct ThreadConfig {
 
 impl ThreadConfig {
     pub fn new(priority: i32, cpu_affinity: Option<usize>) -> Self {
-        Self { priority, cpu_affinity }
+        Self {
+            priority,
+            cpu_affinity,
+        }
     }
 
     pub(crate) fn apply_logged(&self) {
@@ -66,11 +69,17 @@ impl ThreadConfig {
                 if self.priority < min || self.priority > max {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("SCHED_FIFO priority {} out of range [{min}..={max}]", self.priority),
+                        format!(
+                            "SCHED_FIFO priority {} out of range [{min}..={max}]",
+                            self.priority
+                        ),
                     ));
                 }
-                let param = libc::sched_param { sched_priority: self.priority };
-                let rc = libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
+                let param = libc::sched_param {
+                    sched_priority: self.priority,
+                };
+                let rc =
+                    libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
                 if rc != 0 {
                     return Err(io::Error::from_raw_os_error(rc));
                 }

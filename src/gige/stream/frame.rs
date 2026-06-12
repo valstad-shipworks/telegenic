@@ -71,7 +71,10 @@ pub(crate) struct PooledBuf {
 
 impl PooledBuf {
     pub fn new(slot: BufSlot, home: flume::Sender<BufSlot>) -> Self {
-        Self { slot: Some(slot), home }
+        Self {
+            slot: Some(slot),
+            home,
+        }
     }
 
     fn bytes(&self) -> &[u8] {

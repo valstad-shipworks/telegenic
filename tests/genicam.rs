@@ -190,7 +190,10 @@ fn command_writes_command_value() {
 
     let reg = g.lookup("AcqStartReg").unwrap();
     let err = g.int_value(reg, &port).unwrap_err();
-    assert!(matches!(err, GenicamError::Access(_)), "WO register must not read");
+    assert!(
+        matches!(err, GenicamError::Access(_)),
+        "WO register must not read"
+    );
 }
 
 #[test]
@@ -247,18 +250,40 @@ fn access_modes() {
     let (g, _) = setup();
     assert_eq!(g.access_mode(g.lookup("Width").unwrap()), AccessMode::RW);
     assert_eq!(g.access_mode(g.lookup("WidthMax").unwrap()), AccessMode::RO);
-    assert_eq!(g.access_mode(g.lookup("PayloadSize").unwrap()), AccessMode::RO);
-    assert_eq!(g.access_mode(g.lookup("AcquisitionStart").unwrap()), AccessMode::WO);
+    assert_eq!(
+        g.access_mode(g.lookup("PayloadSize").unwrap()),
+        AccessMode::RO
+    );
+    assert_eq!(
+        g.access_mode(g.lookup("AcquisitionStart").unwrap()),
+        AccessMode::WO
+    );
 }
 
 #[test]
 fn parses_hikrobot_xml() {
-    let xml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/Hikrobot.xml"))
-        .expect("read Hikrobot.xml");
+    let xml = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/Hikrobot.xml"
+    ))
+    .expect("read Hikrobot.xml");
     let graph = parse_xml(&xml).expect("parse Hikrobot");
-    assert!(graph.len() > 1000, "expected thousands of nodes, got {}", graph.len());
-    for feature in ["Width", "Height", "PixelFormat", "ExposureTime", "Gain",
-                    "AcquisitionStart", "AcquisitionStop", "PayloadSize", "TLParamsLocked"] {
+    assert!(
+        graph.len() > 1000,
+        "expected thousands of nodes, got {}",
+        graph.len()
+    );
+    for feature in [
+        "Width",
+        "Height",
+        "PixelFormat",
+        "ExposureTime",
+        "Gain",
+        "AcquisitionStart",
+        "AcquisitionStop",
+        "PayloadSize",
+        "TLParamsLocked",
+    ] {
         assert!(graph.lookup(feature).is_ok(), "missing {feature}");
     }
     let pf = graph.lookup("PixelFormat").unwrap();
@@ -268,19 +293,31 @@ fn parses_hikrobot_xml() {
 
 #[test]
 fn parses_imperx_xml() {
-    let xml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/Imperx.xml"))
-        .expect("read Imperx.xml");
+    let xml = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/Imperx.xml"
+    ))
+    .expect("read Imperx.xml");
     let graph = parse_xml(&xml).expect("parse Imperx");
     assert!(graph.len() > 300, "got {}", graph.len());
-    for feature in ["Width", "Height", "PixelFormat", "AcquisitionStart", "PayloadSize"] {
+    for feature in [
+        "Width",
+        "Height",
+        "PixelFormat",
+        "AcquisitionStart",
+        "PayloadSize",
+    ] {
         assert!(graph.lookup(feature).is_ok(), "missing {feature}");
     }
 }
 
 #[test]
 fn imperx_width_reads_through_mock_registers() {
-    let xml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/Imperx.xml"))
-        .expect("read Imperx.xml");
+    let xml = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/Imperx.xml"
+    ))
+    .expect("read Imperx.xml");
     let mut graph = parse_xml(&xml).expect("parse Imperx");
     let port = MockPort::new(0x20000);
     // WidthReg is an IntReg at 0xD300, big-endian.

@@ -173,9 +173,9 @@ impl<'a> Ack<'a> {
 
     /// READ_REGISTER_ACK payload: one u32 value per requested address.
     pub fn register_values(&self) -> impl Iterator<Item = u32> + '_ {
-        self.payload.chunks_exact(4).map(|c| {
-            U32::read_from_bytes(c).map_or(0, |v| v.get())
-        })
+        self.payload
+            .chunks_exact(4)
+            .map(|c| U32::read_from_bytes(c).map_or(0, |v| v.get()))
     }
 }
 
@@ -217,7 +217,11 @@ fn header(command: u16, flags: u8, payload_len: usize, id: u16) -> CmdHeader {
 
 pub fn encode_discovery(allow_broadcast_ack: bool) -> [u8; HEADER_LEN] {
     let flags = FLAG_ACK_REQUIRED
-        | if allow_broadcast_ack { FLAG_ALLOW_BROADCAST_ACK } else { 0 };
+        | if allow_broadcast_ack {
+            FLAG_ALLOW_BROADCAST_ACK
+        } else {
+            0
+        };
     let mut buf = [0u8; HEADER_LEN];
     buf.copy_from_slice(header(DISCOVERY_CMD, flags, 0, DISCOVERY_ID).as_bytes());
     buf
@@ -225,7 +229,9 @@ pub fn encode_discovery(allow_broadcast_ack: bool) -> [u8; HEADER_LEN] {
 
 pub fn encode_read_reg(addrs: &[u32], id: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(HEADER_LEN + 4 * addrs.len());
-    buf.extend_from_slice(header(READ_REGISTER_CMD, FLAG_ACK_REQUIRED, 4 * addrs.len(), id).as_bytes());
+    buf.extend_from_slice(
+        header(READ_REGISTER_CMD, FLAG_ACK_REQUIRED, 4 * addrs.len(), id).as_bytes(),
+    );
     for &addr in addrs {
         buf.extend_from_slice(U32::new(addr).as_bytes());
     }
@@ -234,7 +240,9 @@ pub fn encode_read_reg(addrs: &[u32], id: u16) -> Vec<u8> {
 
 pub fn encode_write_reg(pairs: &[(u32, u32)], id: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(HEADER_LEN + 8 * pairs.len());
-    buf.extend_from_slice(header(WRITE_REGISTER_CMD, FLAG_ACK_REQUIRED, 8 * pairs.len(), id).as_bytes());
+    buf.extend_from_slice(
+        header(WRITE_REGISTER_CMD, FLAG_ACK_REQUIRED, 8 * pairs.len(), id).as_bytes(),
+    );
     for &(addr, value) in pairs {
         buf.extend_from_slice(U32::new(addr).as_bytes());
         buf.extend_from_slice(U32::new(value).as_bytes());
@@ -254,7 +262,9 @@ pub fn encode_write_mem(addr: u32, data: &[u8], id: u16) -> Vec<u8> {
     debug_assert!(data.len() <= DATA_SIZE_MAX);
     debug_assert!(data.len().is_multiple_of(4));
     let mut buf = Vec::with_capacity(HEADER_LEN + 4 + data.len());
-    buf.extend_from_slice(header(WRITE_MEMORY_CMD, FLAG_ACK_REQUIRED, 4 + data.len(), id).as_bytes());
+    buf.extend_from_slice(
+        header(WRITE_MEMORY_CMD, FLAG_ACK_REQUIRED, 4 + data.len(), id).as_bytes(),
+    );
     buf.extend_from_slice(U32::new(addr).as_bytes());
     buf.extend_from_slice(data);
     buf
@@ -279,7 +289,8 @@ pub fn encode_packet_resend(
 ) -> usize {
     const PACKET_ID_MASK: u32 = 0x00ff_ffff;
     if extended_ids {
-        buf[..HEADER_LEN].copy_from_slice(header(PACKET_RESEND_CMD, FLAG_EXTENDED_IDS, 20, id).as_bytes());
+        buf[..HEADER_LEN]
+            .copy_from_slice(header(PACKET_RESEND_CMD, FLAG_EXTENDED_IDS, 20, id).as_bytes());
         buf[8..12].copy_from_slice(U32::new(0).as_bytes());
         buf[12..16].copy_from_slice(U32::new(first).as_bytes());
         buf[16..20].copy_from_slice(U32::new(last).as_bytes());
@@ -411,8 +422,8 @@ mod tests {
     fn ack_parse() {
         // READ_REGISTER_ACK with two values
         let raw = [
-            0x00, 0x00, 0x00, 0x81, 0x00, 0x08, 0x00, 0x07,
-            0x00, 0x00, 0x00, 0x02, 0xde, 0xad, 0xbe, 0xef,
+            0x00, 0x00, 0x00, 0x81, 0x00, 0x08, 0x00, 0x07, 0x00, 0x00, 0x00, 0x02, 0xde, 0xad,
+            0xbe, 0xef,
         ];
         let ack = Ack::parse(&raw).unwrap();
         assert_eq!(ack.status, GvcpStatus::SUCCESS);
@@ -441,7 +452,9 @@ mod tests {
 
     #[test]
     fn pending_ack_timeout() {
-        let raw = [0x00, 0x00, 0x00, 0x89, 0x00, 0x04, 0x00, 0x03, 0x00, 0x00, 0x03, 0xe8];
+        let raw = [
+            0x00, 0x00, 0x00, 0x89, 0x00, 0x04, 0x00, 0x03, 0x00, 0x00, 0x03, 0xe8,
+        ];
         let ack = Ack::parse(&raw).unwrap();
         assert_eq!(ack.pending_ack_timeout_ms(), Some(1000));
     }

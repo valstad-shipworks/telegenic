@@ -4,3 +4,4 @@ __pycache__/
 *.so
 *.whl
 .venv
+.ruff_cache

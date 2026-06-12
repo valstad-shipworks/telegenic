@@ -23,7 +23,9 @@ pub struct ResponseHandle<T> {
 
 impl<T> Clone for ResponseHandle<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
