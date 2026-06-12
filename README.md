@@ -1,9 +1,6 @@
 # telegenic
 
-Pure-Rust GenICam camera library. A camera's features — `ExposureTime`,
-`PixelFormat`, `Width`, `TriggerMode`, ... — are exposed by name through the
-GenICam node graph parsed from the device's own description XML, so any
-standards-compliant camera works without per-vendor code.
+Pure-Rust GenICam camera library.
 
 Transports are pluggable backends behind the feature layer. The only backend
 today is GigE Vision (`telegenic::gige`): GVCP (control) and GVSP (stream)

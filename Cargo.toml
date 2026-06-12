@@ -2,6 +2,14 @@
 name = "telegenic"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+authors = ["Bowan Foryt <bowan@valstad.com>"]
+description = "Pure-Rust GenICam camera library"
+repository = "https://github.com/valstad-shipworks/telegenic"
+documentation = "https://docs.rs/telegenic"
+readme = "README.md"
+keywords = ["python", "robotics", "genicam"]
+categories = ["science::robotics", "hardware-support", "network-programming"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
