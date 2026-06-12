@@ -53,3 +53,20 @@ pub enum GenicamError {
 }
 
 pub type GenicamResult<T> = std::result::Result<T, GenicamError>;
+
+#[cfg(feature = "py")]
+impl From<CameraError> for pyo3::PyErr {
+    fn from(e: CameraError) -> Self {
+        crate::py::CameraException::new_err(e.to_string())
+    }
+}
+
+#[cfg(feature = "py")]
+impl From<GenicamError> for pyo3::PyErr {
+    fn from(e: GenicamError) -> Self {
+        match e {
+            GenicamError::Camera(inner) => inner.into(),
+            other => crate::py::GenicamException::new_err(other.to_string()),
+        }
+    }
+}

@@ -36,6 +36,8 @@ pub mod error;
 pub mod genicam;
 pub mod gige;
 pub mod handle;
+#[cfg(feature = "py")]
+mod py;
 mod thread_util;
 
 pub use error::{CameraError, GenicamError, Result};

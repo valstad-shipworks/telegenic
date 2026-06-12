@@ -89,6 +89,7 @@ impl Drop for PooledBuf {
 
 /// How a frame ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "py", pyo3::pyclass(eq, eq_int, skip_from_py_object))]
 pub enum FrameStatus {
     /// All packets received.
     Complete,

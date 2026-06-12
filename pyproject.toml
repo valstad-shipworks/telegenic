@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "telegenic"
+description = "Pure-Rust GenICam camera library (GigE Vision backend, no vendor SDK)"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+features = ["py", "pyo3/extension-module"]
+bindings = "pyo3"
+python-source = "py_src"
+module-name = "telegenic._telegenic_core"
+profile = "release"

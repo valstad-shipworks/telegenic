@@ -92,6 +92,7 @@ impl StreamConfig {
 
 /// Stream receiver counters, all monotonic since stream open.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "py", pyo3::pyclass(get_all, skip_from_py_object))]
 pub struct StreamStats {
     pub packets: u64,
     pub bytes: u64,
@@ -119,6 +120,7 @@ pub struct StreamStats {
 /// bounded buffer; when it is full new frames are dropped for that
 /// subscriber and counted in [`StreamStats::frames_dropped`].
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "py", pyo3::pyclass(skip_from_py_object))]
 pub struct FrameChannel {
     rx: flume::Receiver<Arc<Frame>>,
 }
@@ -168,6 +170,7 @@ pub(crate) struct StreamShared {
 
 /// An open stream channel. Owns the receiver worker; dropping the handle
 /// stops the worker and closes the channel on the device (SCP := 0).
+#[cfg_attr(feature = "py", pyo3::pyclass(skip_from_py_object))]
 pub struct StreamChannel {
     pub(crate) to_worker: flume::Sender<runner::ToStreamWorker>,
     pub(crate) thread: ThreadHandle,

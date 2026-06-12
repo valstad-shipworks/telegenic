@@ -40,6 +40,7 @@ impl ValueRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "py", pyo3::pyclass(eq, eq_int, skip_from_py_object))]
 pub enum AccessMode {
     RO,
     WO,

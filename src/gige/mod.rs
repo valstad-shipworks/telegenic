@@ -113,6 +113,7 @@ impl GigeConfig {
 
 /// Control-channel counters.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "py", pyo3::pyclass(get_all, skip_from_py_object))]
 pub struct LinkStats {
     pub commands: u64,
     pub acks: u64,

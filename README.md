@@ -63,6 +63,34 @@ methods return `Disconnected` while no link is up.
     packet size negotiation, frames fanned out as `Arc<Frame>` over bounded
     channels with drop-on-full.
 
+## Python
+
+The same library ships as a Python package (PyO3/maturin, `py` feature;
+`pip install telegenic` once published, or `maturin develop` from a
+checkout). The GenICam surface maps one-to-one, every blocking call
+releases the GIL, and frames expose their pixels as `bytes` for
+`numpy.frombuffer`:
+
+```python
+import telegenic
+
+cam = telegenic.Camera("10.0.0.210")
+cam.connect()
+cam.set_float("ExposureTime", 5000.0)
+
+with cam.snapshot_session() as session:   # camera idle between snaps
+    frame = session.snap(timeout=5.0)
+    print(frame.width, frame.height, frame.pixel_format)
+
+stream = cam.start_acquisition()          # continuous; keep `stream` alive
+for frame in stream.subscribe(16):
+    print(frame)
+cam.stop_acquisition()
+```
+
+`telegenic.discover()` finds cameras on the local subnets. Type stubs and
+docstrings ship in the package (`telegenic/__init__.pyi`).
+
 ## Examples
 
 ```sh
