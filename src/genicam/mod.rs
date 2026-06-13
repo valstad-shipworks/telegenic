@@ -21,7 +21,7 @@ use crate::gige::GigECamera;
 use crate::gige::stream::{Frame, StreamConfig};
 
 pub use acquisition::Acquisition;
-pub use node::{AccessMode, Genicam, NodeId};
+pub use node::{AccessMode, Genicam, NodeId, NodeKind};
 pub use snapshot::SnapshotSession;
 pub use url::XmlUrl;
 
@@ -121,6 +121,29 @@ impl GenICamera {
             .genicam_ref()
             .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
         Ok(graph.node_names().map(str::to_string).collect())
+    }
+
+    pub fn node_kind(&self, name: &str) -> GenicamResult<NodeKind> {
+        let graph = self
+            .transport()
+            .genicam_ref()
+            .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
+        Ok(graph.kind_of(graph.lookup(name)?))
+    }
+
+    /// The feature names a `Category` lists, in XML order (empty for
+    /// non-categories). Walk from `"Root"` to traverse the whole tree.
+    pub fn category_features(&self, name: &str) -> GenicamResult<Vec<String>> {
+        let graph = self
+            .transport()
+            .genicam_ref()
+            .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
+        let id = graph.lookup(name)?;
+        Ok(graph
+            .category_features(id)
+            .into_iter()
+            .map(|f| graph.node_name(f).to_string())
+            .collect())
     }
 
     pub fn get_integer(&mut self, name: &str) -> GenicamResult<i64> {
@@ -329,6 +352,14 @@ impl Features<'_> {
 
     pub fn access_mode(&mut self, name: &str) -> GenicamResult<AccessMode> {
         self.0.access_mode(name)
+    }
+
+    pub fn node_kind(&self, name: &str) -> GenicamResult<NodeKind> {
+        self.0.node_kind(name)
+    }
+
+    pub fn category_features(&self, name: &str) -> GenicamResult<Vec<String>> {
+        self.0.category_features(name)
     }
 
     pub fn invalidate_caches(&mut self) -> GenicamResult<()> {

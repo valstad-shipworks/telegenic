@@ -48,6 +48,21 @@ pub enum AccessMode {
     RW,
 }
 
+/// Coarse classification of a node for external introspection (e.g. a
+/// generic settings UI walking the category tree). Register / converter /
+/// plumbing nodes that don't map to a typed feature report [`NodeKind::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    Category,
+    Integer,
+    Float,
+    Boolean,
+    String,
+    Enumeration,
+    Command,
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Endianness {
     #[default]
@@ -213,6 +228,40 @@ impl Genicam {
 
     pub fn node_names(&self) -> impl Iterator<Item = &str> {
         self.nodes.iter().map(|n| &*n.name)
+    }
+
+    pub fn node_name(&self, id: NodeId) -> &str {
+        &self.nodes[id.0 as usize].name
+    }
+
+    pub fn kind_of(&self, id: NodeId) -> NodeKind {
+        match &self.nodes[id.0 as usize].node {
+            Node::Category { .. } => NodeKind::Category,
+            Node::Integer { .. } => NodeKind::Integer,
+            Node::Float { .. } => NodeKind::Float,
+            Node::Boolean { .. } => NodeKind::Boolean,
+            Node::StringFeat { .. } => NodeKind::String,
+            Node::Enumeration { .. } => NodeKind::Enumeration,
+            Node::Command { .. } => NodeKind::Command,
+            // Converters and SwissKnives present as float features.
+            Node::Converter { .. } | Node::SwissKnife { .. } => NodeKind::Float,
+            Node::Register { .. } | Node::Port => NodeKind::Other,
+        }
+    }
+
+    /// The features a `Category` node lists, in XML order. Empty for
+    /// non-category nodes and for dangling links.
+    pub fn category_features(&self, id: NodeId) -> Vec<NodeId> {
+        match &self.nodes[id.0 as usize].node {
+            Node::Category { features } => features
+                .iter()
+                .filter_map(|link| match link {
+                    Link::Id(id) => Some(*id),
+                    Link::Name(name) => self.by_name.get(name.as_str()).copied(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     pub(crate) fn name_of(&self, id: NodeId) -> &str {
