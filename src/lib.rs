@@ -41,7 +41,7 @@ mod py;
 mod thread_util;
 
 pub use error::{CameraError, GenicamError, Result};
-pub use genicam::{AccessMode, Acquisition, Features, GenICamera, SnapshotSession};
+pub use genicam::{AccessMode, Acquisition, Features, GenICamera, NodeKind, SnapshotSession};
 pub use gige::PixelFormat;
 pub use gige::stream::{
     Frame, FrameChannel, FrameStatus, PacketSize, PayloadKind, ResendPolicy, StreamChannel,
