@@ -291,7 +291,7 @@ impl Runner {
                         want,
                         next_addr,
                     };
-                    self.send_op(op, PendingSend::ReadMemChunk);
+                    self.continue_op(op, PendingSend::ReadMemChunk);
                 }
             }
             Op::WriteMem {
@@ -310,7 +310,7 @@ impl Runner {
                         offset,
                         base_addr,
                     };
-                    self.send_op(op, PendingSend::WriteMemChunk);
+                    self.continue_op(op, PendingSend::WriteMemChunk);
                 }
             }
             Op::Heartbeat => {
@@ -398,6 +398,18 @@ impl Runner {
     fn enqueue(&mut self, op: Op, send: PendingSend) {
         self.queue.push_back(op);
         self.queued_payloads.push_back(send);
+    }
+
+    /// Send the next chunk of a multi-transaction memory op, letting a due
+    /// heartbeat cut in at the chunk boundary — a long transfer (e.g. the
+    /// GenICam XML fetch) must not hold the device's heartbeat window shut.
+    fn continue_op(&mut self, op: Op, send: PendingSend) {
+        if matches!(self.queue.front(), Some(Op::Heartbeat)) {
+            self.queue.insert(1, op);
+            self.queued_payloads.insert(1, send);
+        } else {
+            self.send_op(op, send);
+        }
     }
 
     /// Start the next queued op if nothing is in flight.
@@ -512,10 +524,12 @@ impl Runner {
             })
         ) || self.queue.iter().any(|op| matches!(op, Op::Heartbeat));
         if !pending_heartbeat {
-            self.enqueue(
-                Op::Heartbeat,
-                PendingSend::ReadRegs(vec![bootstrap::CONTROL_CHANNEL_PRIVILEGE]),
-            );
+            // Jump the queue: heartbeats keep device control alive and must
+            // not wait behind a backlog of user transactions.
+            self.queue.push_front(Op::Heartbeat);
+            self.queued_payloads.push_front(PendingSend::ReadRegs(vec![
+                bootstrap::CONTROL_CHANNEL_PRIVILEGE,
+            ]));
         }
     }
 
@@ -547,6 +561,21 @@ impl Runner {
         }
         self.event_txs.clear();
         self.thread.has_died();
+        // Requests can sit behind the Shutdown message or land while this
+        // teardown runs; fail them so no ResponseHandle is left pending
+        // forever. `ControlPort::send` re-checks liveness after sending (and
+        // has_died is already set above), so anything that slips past this
+        // drain is failed by the sender instead — fulfilment is idempotent.
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                ToWorker::ReadReg(_, h) => h.fail(clone_err(&err)),
+                ToWorker::ReadRegs(_, h) => h.fail(clone_err(&err)),
+                ToWorker::WriteRegs(_, h) => h.fail(clone_err(&err)),
+                ToWorker::ReadMem { handle, .. } => handle.fail(clone_err(&err)),
+                ToWorker::WriteMem { handle, .. } => handle.fail(clone_err(&err)),
+                ToWorker::SubscribeEvents(_) | ToWorker::Shutdown => {}
+            }
+        }
     }
 }
 

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{CameraError, GenicamError, GenicamResult};
+use crate::error::{GenicamError, GenicamResult};
 use crate::gige::stream::{Frame, FrameChannel, StreamChannel, StreamConfig};
 
 use super::GenICamera;
@@ -94,18 +94,19 @@ impl<'a> SnapshotSession<'a> {
         {
             tracing::warn!("AcquisitionStop after snap failed: {e}");
         }
-        frame.ok_or(GenicamError::Camera(CameraError::Timeout))
+        frame.ok_or(GenicamError::FrameTimeout)
     }
 
     pub fn stream(&self) -> &StreamChannel {
         &self.stream
     }
 
-    /// The camera, for tuning features between snaps (e.g. `ExposureTime`).
+    /// The feature tree, for tuning between snaps (e.g. `ExposureTime`).
     /// Transport parameters stay locked (`TLParamsLocked`) for the session's
-    /// lifetime, so size and pixel format cannot change here.
-    pub fn camera(&mut self) -> &mut GenICamera {
-        self.cam
+    /// lifetime, so size and pixel format cannot change here — and lifecycle
+    /// methods are deliberately out of reach.
+    pub fn features(&mut self) -> super::Features<'_> {
+        super::Features(self.cam)
     }
 }
 

@@ -15,11 +15,13 @@ parsed from the device's own description XML. Typical use::
         frame = session.snap(timeout=5.0)
         print(frame.width, frame.height, frame.pixel_format)
 
-    # Or continuous acquisition:
-    stream = cam.start_acquisition()
-    for frame in stream.subscribe(16):
-        print(frame)
-    cam.stop_acquisition()
+    # Or continuous acquisition — the guard subscribes before the camera
+    # starts and stops it again on exit:
+    with cam.start_acquisition() as acq:
+        for _ in range(100):
+            frame = acq.wait_for(timeout=1.0)
+            if frame is not None:
+                print(frame)
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ __version__: str
 
 __all__ = [
     "AccessMode",
+    "Acquisition",
     "Camera",
     "CameraError",
     "DeviceInfo",
@@ -40,7 +43,6 @@ __all__ = [
     "GenicamError",
     "LinkStats",
     "SnapshotSession",
-    "StreamChannel",
     "StreamStats",
     "discover",
 ]
@@ -89,6 +91,12 @@ class Camera:
     name (``"Width"``, ``"ExposureTime"``, ...) with one getter/setter pair
     per feature type. The handle is thread-safe; calls are serialized on an
     internal lock.
+
+    Lifecycle actions are mutually exclusive: while an :class:`Acquisition`
+    or :class:`SnapshotSession` is active, :meth:`connect`,
+    :meth:`disconnect`, :meth:`snap`, :meth:`start_acquisition`, and
+    :meth:`snapshot_session` raise :class:`ValueError` until it is stopped.
+    Feature access stays available throughout.
     """
 
     def __new__(
@@ -123,11 +131,17 @@ class Camera:
 
         :raises CameraError: if the device is unreachable or denies control.
         :raises GenicamError: if the device description cannot be loaded.
+        :raises ValueError: while an acquisition or snapshot session is
+            active.
         """
 
     def disconnect(self, deadline: float = 0.5) -> None:
         """Release device control and stop the I/O worker. The feature
-        model is dropped with the connection; :meth:`connect` reloads it."""
+        model is dropped with the connection; :meth:`connect` reloads it.
+
+        :raises ValueError: while an acquisition or snapshot session is
+            active — stop it first.
+        """
 
     def is_connected(self) -> bool: ...
     def device_info(self) -> DeviceInfo:
@@ -174,8 +188,14 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
-    ) -> StreamChannel:
-        """Open the stream channel and start continuous acquisition.
+    ) -> Acquisition:
+        """Start continuous acquisition, returning a guard that owns the
+        whole lifecycle.
+
+        The guard's built-in subscription (sized to ``n_buffers``) exists
+        before the camera is told to start, so even the first frame is
+        delivered. Use it as a context manager or call
+        :meth:`Acquisition.stop`.
 
         :param channel: Stream channel index; almost always 0.
         :param n_buffers: Frame buffers in the receiver pool.
@@ -183,12 +203,9 @@ class Camera:
             negotiate the largest the link carries.
         :param packet_delay: Inter-packet delay in device timestamp ticks.
         :param resend: Request resends for missing packets.
+        :raises ValueError: while another acquisition or snapshot session
+            is active.
         """
-
-    def stop_acquisition(self) -> None:
-        """Stop acquisition and unlock transport parameters. The stream
-        channel closes when the :class:`StreamChannel` is garbage-collected
-        (or its last reference dropped)."""
 
     def snap(
         self,
@@ -207,7 +224,10 @@ class Camera:
         :param timeout: Seconds to wait for the frame; must cover exposure
             plus transfer (and the trigger wait, when a trigger is
             configured).
-        :raises CameraError: on timeout or a transport failure.
+        :raises GenicamError: when no frame arrives within the timeout.
+        :raises CameraError: on a transport failure.
+        :raises ValueError: while an acquisition or snapshot session is
+            active.
         """
 
     def snapshot_session(
@@ -225,7 +245,11 @@ class Camera:
         transmits only while a :meth:`SnapshotSession.snap` is in flight, so
         an open session uses no link bandwidth between captures. Switches
         ``AcquisitionMode`` to ``SingleFrame`` when the device offers it
-        (restored when the session closes)."""
+        (restored when the session closes).
+
+        :raises ValueError: while an acquisition or another snapshot
+            session is active.
+        """
 
 @final
 class SnapshotSession:
@@ -243,7 +267,8 @@ class SnapshotSession:
         camera idle again. Check :attr:`Frame.status` before trusting the
         pixels.
 
-        :raises CameraError: on timeout or a transport failure.
+        :raises GenicamError: when no frame arrives within the timeout.
+        :raises CameraError: on a transport failure.
         :raises ValueError: if the session is closed.
         """
 
@@ -260,15 +285,34 @@ class SnapshotSession:
     def __exit__(self, *args: object) -> bool: ...
 
 @final
-class StreamChannel:
-    """An open GVSP stream channel receiving on its own thread. Frames fan
-    out to subscribers; the channel closes on the device when this object
-    is garbage-collected."""
+class Acquisition:
+    """A running continuous acquisition.
+
+    Frames arrive on a built-in subscription created before the camera was
+    told to start. Iterating blocks until the next frame; Ctrl-C interrupts
+    promptly. Use as a context manager (or call :meth:`stop`) so the camera
+    is stopped and transport parameters unlock::
+
+        with cam.start_acquisition() as acq:
+            for frame in acq:
+                ...
+    """
+
+    def wait_for(self, timeout: float = 1.0) -> Frame | None:
+        """Block until a frame is buffered or ``timeout`` seconds elapse."""
+
+    def try_recv(self) -> Frame | None: ...
+    def recv_all(self) -> list[Frame]:
+        """Drain and return every buffered frame."""
+
+    def clear(self) -> None:
+        """Discard buffered frames."""
 
     def subscribe(self, capacity: int = 16) -> FrameChannel:
-        """A new receiver buffering up to ``capacity`` frames. Each
-        subscription is independent; when its buffer is full, new frames
-        are dropped for that subscriber only and counted in
+        """An additional receiver buffering up to ``capacity`` frames.
+        Unlike the built-in subscription it only sees frames completed
+        after this call; when its buffer is full, new frames are dropped
+        for that subscriber only and counted in
         :attr:`StreamStats.frames_dropped`."""
 
     def stats(self) -> StreamStats: ...
@@ -278,7 +322,15 @@ class StreamChannel:
     def local_addr(self) -> str:
         """Where the device sends this stream, as ``ip:port``."""
 
-    def is_running(self) -> bool: ...
+    def is_stopped(self) -> bool: ...
+    def stop(self) -> None:
+        """Stop the camera, unlock transport parameters, and close the
+        stream channel. Idempotent; buffered frames stay readable."""
+
+    def __enter__(self) -> Acquisition: ...
+    def __exit__(self, *args: object) -> bool: ...
+    def __iter__(self) -> Iterator[Frame]: ...
+    def __next__(self) -> Frame: ...
 
 @final
 class FrameChannel:
@@ -329,8 +381,10 @@ class Frame:
 
     def data(self) -> bytes:
         """The payload bytes, e.g. for ``numpy.frombuffer``. For an
-        incomplete frame the holes read as stale buffer content — check
-        :attr:`status` first."""
+        incomplete frame the slice extends to the last received packet
+        (data past a hole is not cut off) and the holes read as stale
+        buffer content — check :attr:`status` first, and compare
+        ``len(data())`` with :attr:`received_size` to detect holes."""
 
 @final
 class StreamStats:

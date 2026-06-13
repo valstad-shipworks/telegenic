@@ -1,7 +1,7 @@
 import importlib.metadata
 
 try:
-    __version__ = importlib.metadata.version("telegenic")
+    __version__ = importlib.metadata.version("telegenicam")
 except importlib.metadata.PackageNotFoundError:
     __version__ = "0.0.0"
 
@@ -9,6 +9,7 @@ from importlib import import_module
 
 __all__ = [
     "AccessMode",
+    "Acquisition",
     "Camera",
     "CameraError",
     "DeviceInfo",
@@ -18,7 +19,6 @@ __all__ = [
     "GenicamError",
     "LinkStats",
     "SnapshotSession",
-    "StreamChannel",
     "StreamStats",
     "discover",
 ]

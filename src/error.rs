@@ -53,6 +53,10 @@ pub enum GenicamError {
     },
     #[error("device description: {0}")]
     Xml(String),
+    /// A snap produced no frame within its timeout. Distinct from
+    /// [`CameraError::Timeout`], which is a control-transaction timeout.
+    #[error("no frame arrived within the snap timeout")]
+    FrameTimeout,
     #[error(transparent)]
     Camera(#[from] CameraError),
 }

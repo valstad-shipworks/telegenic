@@ -19,7 +19,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use crate::error::{CameraError, GenicamError, GenicamResult};
+use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::{AccessMode, GenICamera};
 use crate::gige::discovery::{self, DiscoveryConfig};
 use crate::gige::stream::{
@@ -56,7 +56,7 @@ fn build_stream_config(
     packet_delay: Option<u32>,
     resend: bool,
 ) -> StreamConfig {
-    let mut cfg = StreamConfig::new(0);
+    let mut cfg = StreamConfig::new();
     cfg.channel = channel;
     cfg.n_buffers = n_buffers;
     if let Some(size) = packet_size {
@@ -75,6 +75,38 @@ fn build_stream_config(
 #[derive(Debug)]
 struct Camera {
     inner: Arc<Mutex<GenICamera>>,
+    /// What currently owns the camera's lifecycle (an acquisition or a
+    /// snapshot session), if anything. The Rust guards enforce exclusivity
+    /// with a `&mut` borrow; the Python twins can't, so the camera enforces
+    /// it at runtime instead.
+    busy: Arc<Mutex<Option<&'static str>>>,
+}
+
+/// Clears the camera's busy marker when the owning guard goes away.
+#[derive(Debug)]
+struct BusyToken {
+    flag: Arc<Mutex<Option<&'static str>>>,
+}
+
+impl Drop for BusyToken {
+    fn drop(&mut self) {
+        *self.flag.lock() = None;
+    }
+}
+
+impl Camera {
+    fn claim(&self, what: &'static str) -> PyResult<BusyToken> {
+        let mut busy = self.busy.lock();
+        if let Some(active) = *busy {
+            return Err(PyValueError::new_err(format!(
+                "camera is busy ({active} in progress); stop it first"
+            )));
+        }
+        *busy = Some(what);
+        Ok(BusyToken {
+            flag: self.busy.clone(),
+        })
+    }
 }
 
 #[pymethods]
@@ -109,22 +141,26 @@ impl Camera {
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(GenICamera::with_config(cfg))),
+            busy: Arc::new(Mutex::new(None)),
         })
     }
 
     #[pyo3(name = "connect")]
     fn py_connect(&self, py: Python<'_>) -> PyResult<()> {
+        let _token = self.claim("a connect")?;
         py.detach(|| self.inner.lock().connect())
             .map_err(Into::into)
     }
 
     #[pyo3(name = "disconnect", signature = (deadline = 0.5))]
-    fn py_disconnect(&self, py: Python<'_>, deadline: f64) {
+    fn py_disconnect(&self, py: Python<'_>, deadline: f64) -> PyResult<()> {
+        let _token = self.claim("a disconnect")?;
         py.detach(|| {
             self.inner
                 .lock()
                 .disconnect(Duration::from_secs_f64(deadline))
         });
+        Ok(())
     }
 
     #[pyo3(name = "is_connected")]
@@ -269,16 +305,16 @@ impl Camera {
         packet_size: Option<u16>,
         packet_delay: Option<u32>,
         resend: bool,
-    ) -> PyResult<StreamChannel> {
+    ) -> PyResult<PyAcquisition> {
+        let token = self.claim("an acquisition")?;
         let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
-        py.detach(|| self.inner.lock().start_acquisition(cfg))
-            .map_err(Into::into)
-    }
-
-    #[pyo3(name = "stop_acquisition")]
-    fn py_stop_acquisition(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.lock().stop_acquisition())
-            .map_err(Into::into)
+        let (state, frames) = py.detach(|| AcqState::start(&mut self.inner.lock(), cfg))?;
+        Ok(PyAcquisition {
+            cam: self.inner.clone(),
+            frames,
+            state: Mutex::new(Some(state)),
+            busy: Mutex::new(Some(token)),
+        })
     }
 
     #[pyo3(name = "snap", signature = (
@@ -301,6 +337,7 @@ impl Camera {
         packet_delay: Option<u32>,
         resend: bool,
     ) -> PyResult<PyFrame> {
+        let _token = self.claim("a snap")?;
         let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
         let frame = py.detach(|| {
             self.inner
@@ -327,11 +364,13 @@ impl Camera {
         packet_delay: Option<u32>,
         resend: bool,
     ) -> PyResult<PySnapshotSession> {
+        let token = self.claim("a snapshot session")?;
         let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
         let state = py.detach(|| SessionState::open(&mut self.inner.lock(), cfg))?;
         Ok(PySnapshotSession {
             cam: self.inner.clone(),
             state: Mutex::new(Some(state)),
+            busy: Mutex::new(Some(token)),
         })
     }
 
@@ -377,30 +416,16 @@ impl SessionState {
             }
         };
 
-        if cfg.payload_size == 0 {
-            let payload = match cam.get_integer("PayloadSize") {
-                Ok(v) => {
-                    usize::try_from(v).map_err(|_| GenicamError::Xml("negative PayloadSize".into()))
-                }
-                Err(e) => Err(e),
-            };
-            match payload {
-                Ok(v) => cfg.payload_size = v,
-                Err(e) => {
-                    if let Some(mode) = restore_mode {
-                        let _ = cam.set_enum("AcquisitionMode", &mode);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        let stream = match cam.transport().open_stream(cfg) {
+        let stream = cam
+            .fill_payload_size(&mut cfg)
+            .and_then(|()| Ok(cam.transport().open_stream(cfg)?));
+        let stream = match stream {
             Ok(stream) => stream,
             Err(e) => {
                 if let Some(mode) = restore_mode {
                     let _ = cam.set_enum("AcquisitionMode", &mode);
                 }
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = cam.set_integer("TLParamsLocked", 1) {
@@ -424,7 +449,7 @@ impl SessionState {
         {
             tracing::warn!("AcquisitionStop after snap failed: {e}");
         }
-        frame.ok_or(GenicamError::Camera(CameraError::Timeout))
+        frame.ok_or(GenicamError::FrameTimeout)
     }
 
     fn close(mut self, cam: &mut GenICamera) {
@@ -448,6 +473,7 @@ impl SessionState {
 struct PySnapshotSession {
     cam: Arc<Mutex<GenICamera>>,
     state: Mutex<Option<SessionState>>,
+    busy: Mutex<Option<BusyToken>>,
 }
 
 impl PySnapshotSession {
@@ -456,6 +482,7 @@ impl PySnapshotSession {
         if let Some(state) = self.state.lock().take() {
             state.close(&mut cam);
         }
+        drop(self.busy.lock().take());
     }
 }
 
@@ -538,6 +565,190 @@ impl Drop for PySnapshotSession {
             state.close(&mut cam);
         } else {
             tracing::warn!("snapshot session dropped while camera busy; mode not restored");
+        }
+    }
+}
+
+/// The Python twin of the Rust `Acquisition` start/stop sequence, run
+/// against the shared camera per call instead of holding a borrow. Kept in
+/// lockstep with `genicam::acquisition` — change one, change both.
+#[derive(Debug)]
+struct AcqState {
+    stream: StreamChannel,
+}
+
+impl AcqState {
+    fn start(cam: &mut GenICamera, mut cfg: StreamConfig) -> GenicamResult<(Self, FrameChannel)> {
+        cam.fill_payload_size(&mut cfg)?;
+        let capacity = cfg.n_buffers;
+        let stream = cam.transport().open_stream(cfg)?;
+        let frames = stream.subscribe(capacity);
+        if let Err(e) = cam.set_integer("TLParamsLocked", 1) {
+            tracing::debug!("TLParamsLocked not set: {e}");
+        }
+        if let Err(e) = cam.execute("AcquisitionStart") {
+            if let Err(e) = cam.set_integer("TLParamsLocked", 0) {
+                tracing::debug!("TLParamsLocked not cleared: {e}");
+            }
+            return Err(e);
+        }
+        Ok((Self { stream }, frames))
+    }
+
+    fn stop(self, cam: &mut GenICamera) -> GenicamResult<()> {
+        let result = cam.execute("AcquisitionStop");
+        if let Err(e) = cam.set_integer("TLParamsLocked", 0) {
+            tracing::debug!("TLParamsLocked not cleared: {e}");
+        }
+        // Dropping self closes the stream channel on the device (SCP := 0).
+        result
+    }
+}
+
+/// A running continuous acquisition. The built-in subscription is created
+/// before the camera starts, so even the first frame is delivered. Use as a
+/// context manager or call `stop()`; buffered frames stay readable after.
+#[pyclass(name = "Acquisition", frozen)]
+#[derive(Debug)]
+struct PyAcquisition {
+    cam: Arc<Mutex<GenICamera>>,
+    frames: FrameChannel,
+    state: Mutex<Option<AcqState>>,
+    busy: Mutex<Option<BusyToken>>,
+}
+
+impl PyAcquisition {
+    fn stop_now(&self) -> GenicamResult<()> {
+        let mut cam = self.cam.lock();
+        let result = match self.state.lock().take() {
+            Some(state) => state.stop(&mut cam),
+            None => Ok(()),
+        };
+        drop(self.busy.lock().take());
+        result
+    }
+
+    fn with_stream<T>(&self, f: impl FnOnce(&StreamChannel) -> T) -> PyResult<T> {
+        self.state
+            .lock()
+            .as_ref()
+            .map(|s| f(&s.stream))
+            .ok_or_else(|| PyValueError::new_err("acquisition is stopped"))
+    }
+}
+
+#[pymethods]
+impl PyAcquisition {
+    #[pyo3(name = "wait_for", signature = (timeout = 1.0))]
+    fn py_wait_for(&self, py: Python<'_>, timeout: f64) -> Option<PyFrame> {
+        py.detach(|| self.frames.wait_for(Duration::from_secs_f64(timeout)))
+            .map(|inner| PyFrame { inner })
+    }
+
+    #[pyo3(name = "try_recv")]
+    fn py_try_recv(&self) -> Option<PyFrame> {
+        self.frames.try_recv().map(|inner| PyFrame { inner })
+    }
+
+    #[pyo3(name = "recv_all")]
+    fn py_recv_all(&self) -> Vec<PyFrame> {
+        self.frames
+            .recv_all()
+            .into_iter()
+            .map(|inner| PyFrame { inner })
+            .collect()
+    }
+
+    #[pyo3(name = "clear")]
+    fn py_clear(&self) {
+        self.frames.clear();
+    }
+
+    /// An additional subscription with its own buffer; unlike the built-in
+    /// one it only sees frames completed after this call.
+    #[pyo3(name = "subscribe", signature = (capacity = 16))]
+    fn py_subscribe(&self, capacity: usize) -> PyResult<FrameChannel> {
+        self.with_stream(|s| s.subscribe(capacity))
+    }
+
+    #[pyo3(name = "stats")]
+    fn py_stats(&self) -> PyResult<StreamStats> {
+        self.with_stream(StreamChannel::stats)
+    }
+
+    #[pyo3(name = "packet_size")]
+    fn py_packet_size(&self) -> PyResult<u16> {
+        self.with_stream(StreamChannel::packet_size)
+    }
+
+    #[pyo3(name = "local_addr")]
+    fn py_local_addr(&self) -> PyResult<String> {
+        self.with_stream(|s| s.local_addr().to_string())
+    }
+
+    #[pyo3(name = "is_stopped")]
+    fn py_is_stopped(&self) -> bool {
+        self.state.lock().is_none()
+    }
+
+    /// Stop the camera, unlock transport parameters, and close the stream
+    /// channel. Idempotent; frames already buffered stay readable.
+    #[pyo3(name = "stop")]
+    fn py_stop(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.stop_now()).map_err(Into::into)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<bool> {
+        self.py_stop(py)?;
+        Ok(false)
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyFrame>> {
+        loop {
+            if let Some(inner) = py.detach(|| self.frames.wait_for(NEXT_POLL)) {
+                return Ok(Some(PyFrame { inner }));
+            }
+            py.check_signals()?;
+            if self.frames.is_disconnected() {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Acquisition(stopped={})",
+            if self.state.lock().is_none() {
+                "True"
+            } else {
+                "False"
+            }
+        )
+    }
+}
+
+impl Drop for PyAcquisition {
+    fn drop(&mut self) {
+        let Some(state) = self.state.lock().take() else {
+            return;
+        };
+        // Bounded wait, mirroring PySnapshotSession::drop: never deadlock
+        // with the GIL held. The stream channel still closes either way.
+        if let Some(mut cam) = self.cam.try_lock_for(Duration::from_millis(200)) {
+            if let Err(e) = state.stop(&mut cam) {
+                tracing::warn!("AcquisitionStop on drop failed: {e}");
+            }
+        } else {
+            tracing::warn!("acquisition dropped while camera busy; AcquisitionStop not sent");
         }
     }
 }
@@ -640,44 +851,6 @@ impl PyFrame {
             self.inner.height,
             self.inner.pixel_format,
             self.inner.received_size,
-        )
-    }
-}
-
-#[pymethods]
-impl StreamChannel {
-    /// A new receiver buffering up to `capacity` frames; when full, new
-    /// frames are dropped for this subscriber only.
-    #[pyo3(name = "subscribe", signature = (capacity = 16))]
-    fn py_subscribe(&self, capacity: usize) -> FrameChannel {
-        self.subscribe(capacity)
-    }
-
-    #[pyo3(name = "stats")]
-    fn py_stats(&self) -> StreamStats {
-        self.stats()
-    }
-
-    #[pyo3(name = "packet_size")]
-    fn py_packet_size(&self) -> u16 {
-        self.packet_size()
-    }
-
-    #[pyo3(name = "local_addr")]
-    fn py_local_addr(&self) -> String {
-        self.local_addr().to_string()
-    }
-
-    #[pyo3(name = "is_running")]
-    fn py_is_running(&self) -> bool {
-        self.is_running()
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "StreamChannel({}, packet_size={})",
-            self.local_addr(),
-            self.packet_size()
         )
     }
 }
@@ -833,8 +1006,8 @@ fn telegenic_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Camera>()?;
     m.add_class::<PySnapshotSession>()?;
+    m.add_class::<PyAcquisition>()?;
     m.add_class::<PyFrame>()?;
-    m.add_class::<StreamChannel>()?;
     m.add_class::<FrameChannel>()?;
     m.add_class::<FrameStatus>()?;
     m.add_class::<AccessMode>()?;

@@ -45,9 +45,10 @@ pub const EVENTDATA_ACK: u16 = 0x00c3;
 /// Discovery commands carry this id; regular transactions use 1..=0xfffe.
 pub const DISCOVERY_ID: u16 = 0xffff;
 
-/// Next request id: 0 is reserved as an error value, so wrap 0xffff -> 1.
+/// Next request id: 0 is reserved as an error value and 0xffff for
+/// discovery, so wrap 0xfffe -> 1.
 pub fn next_id(id: u16) -> u16 {
-    if id == 0xffff { 1 } else { id + 1 }
+    if id >= 0xfffe { 1 } else { id + 1 }
 }
 
 /// Status word of an acknowledge (also used by GVSP packets).
@@ -474,6 +475,7 @@ mod tests {
 
     #[test]
     fn id_sequence_skips_zero() {
+        assert_eq!(next_id(0xfffe), 1);
         assert_eq!(next_id(0xffff), 1);
         assert_eq!(next_id(1), 2);
     }

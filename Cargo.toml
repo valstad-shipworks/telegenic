@@ -1,6 +1,6 @@
 [package]
 name = "telegenic"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Bowan Foryt <bowan@valstad.com>"]
@@ -32,7 +32,6 @@ async = ["flume/async"]
 py = ["dep:pyo3"]
 
 [dev-dependencies]
-eframe = "0.34.3"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [target."cfg(unix)".dependencies]

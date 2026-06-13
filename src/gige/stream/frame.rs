@@ -143,16 +143,23 @@ pub struct Frame {
     pub system_timestamp_ns: u64,
     /// Payload bytes actually received.
     pub received_size: usize,
+    /// End of the written payload region: the highest `offset + len` any
+    /// received packet covered. Equal to `received_size` for complete
+    /// frames; larger when interior packets are missing.
+    pub(crate) data_end: usize,
     pub(crate) data: PooledBuf,
 }
 
 impl Frame {
     /// The payload bytes. For a [`FrameStatus::Complete`] image this is the
-    /// full image (plus trailing chunk data when `payload` says so); for
-    /// failed frames the holes read as stale pool content.
+    /// full image (plus trailing chunk data when `payload` says so). For
+    /// failed frames the slice extends to the last received packet — data
+    /// past a hole is not cut off — and the holes themselves read as stale
+    /// pool content; compare the length with
+    /// [`received_size`](Self::received_size) to detect that.
     pub fn data(&self) -> &[u8] {
         let bytes = self.data.bytes();
-        &bytes[..self.received_size.min(bytes.len())]
+        &bytes[..self.data_end.min(bytes.len())]
     }
 }
 

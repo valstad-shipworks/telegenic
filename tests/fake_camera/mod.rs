@@ -18,6 +18,22 @@ use telegenic::gige::proto::gvcp;
 
 pub const MEM_SIZE: usize = 0x10000;
 
+/// Poll `cond` every 2 ms until it holds or `timeout` elapses. Use instead
+/// of a fixed sleep wherever a test waits on worker-thread progress — a
+/// loaded CI runner can deschedule a thread far longer than any sleep.
+pub fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if cond() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return cond();
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 pub struct Knobs {
     /// Drop the next N inbound datagrams (simulated loss).
     pub drop_next: usize,

@@ -5,7 +5,7 @@ mod fake_camera;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use fake_camera::FakeCamera;
+use fake_camera::{FakeCamera, wait_until};
 use telegenic::CameraError;
 use telegenic::gige::proto::bootstrap;
 use telegenic::gige::{GigECamera, GigeConfig, GvcpStatus};
@@ -13,7 +13,9 @@ use telegenic::gige::{GigECamera, GigeConfig, GvcpStatus};
 fn config_for(fake: &FakeCamera) -> GigeConfig {
     let mut cfg = GigeConfig::new(std::net::Ipv4Addr::LOCALHOST);
     cfg.addr = fake.addr();
-    cfg.gvcp_timeout = Duration::from_millis(100);
+    // Generous baseline: timing-sensitive tests override it themselves; a
+    // loaded CI runner must not turn an ordinary round-trip into a timeout.
+    cfg.gvcp_timeout = Duration::from_millis(500);
     cfg.retries = 2;
     cfg
 }
@@ -184,9 +186,14 @@ fn lost_datagrams_are_retried() {
 #[test]
 fn persistent_loss_times_out() {
     let fake = FakeCamera::start();
-    let cam = connect(&fake);
+    let mut cfg = config_for(&fake);
+    cfg.gvcp_timeout = Duration::from_millis(100);
+    let mut cam = GigECamera::with_config(cfg);
+    cam.connect().expect("connect to fake camera");
 
-    fake.knobs().lock().drop_next = 100;
+    // Exactly the read's three attempts — a budget any larger could eat a
+    // heartbeat and tear the connection down.
+    fake.knobs().lock().drop_next = 3;
     let err = cam
         .read_register(bootstrap::VERSION)
         .expect("submit")
@@ -207,12 +214,14 @@ fn persistent_loss_times_out() {
 fn pending_ack_extends_the_deadline() {
     let fake = FakeCamera::start();
     let mut cfg = config_for(&fake);
-    cfg.gvcp_timeout = Duration::from_millis(100);
+    // Shorter than the device delay so only the PENDING_ACK extension can
+    // save the transaction, but with room for a slow runner to deliver it.
+    cfg.gvcp_timeout = Duration::from_millis(250);
     cfg.retries = 0;
     let mut cam = GigECamera::with_config(cfg);
     cam.connect().expect("connect");
 
-    // Three timeouts' worth of delay, bridged by a PENDING_ACK.
+    // More than the base timeout's worth of delay, bridged by a PENDING_ACK.
     fake.knobs().lock().pending_ack_delay = Some(Duration::from_millis(300));
     let value = cam
         .read_register(bootstrap::VERSION)
@@ -263,14 +272,20 @@ fn heartbeat_keeps_control_and_detects_loss() {
     let mut cam = GigECamera::with_config(cfg);
     cam.connect().expect("connect");
 
-    std::thread::sleep(Duration::from_millis(200));
-    let beats = fake.counters.ccp_reads.load(Ordering::Relaxed);
-    assert!(beats >= 3, "expected several heartbeats, saw {beats}");
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            fake.counters.ccp_reads.load(Ordering::Relaxed) >= 3
+        }),
+        "expected several heartbeats, saw {}",
+        fake.counters.ccp_reads.load(Ordering::Relaxed)
+    );
     assert!(cam.is_connected());
 
     fake.clear_ccp();
-    std::thread::sleep(Duration::from_millis(150));
-    assert!(!cam.is_connected(), "control loss should stop the worker");
+    assert!(
+        wait_until(Duration::from_secs(2), || !cam.is_connected()),
+        "control loss should stop the worker"
+    );
     let err = cam.read_register(bootstrap::VERSION).unwrap_err();
     assert!(matches!(err, CameraError::ControlLost), "got {err}");
 
@@ -291,7 +306,11 @@ fn disconnect_releases_control() {
 
     cam.disconnect(Duration::from_millis(500));
     assert!(!cam.is_connected());
-    // The release write is fire-and-forget; give it a moment to land.
-    std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(fake.read_reg(bootstrap::CONTROL_CHANNEL_PRIVILEGE), 0);
+    // The release write is fire-and-forget; poll until it lands.
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            fake.read_reg(bootstrap::CONTROL_CHANNEL_PRIVILEGE) == 0
+        }),
+        "control privilege never released"
+    );
 }
