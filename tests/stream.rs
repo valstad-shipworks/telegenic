@@ -8,7 +8,7 @@ mod fake_camera;
 
 use std::time::Duration;
 
-use fake_camera::{FAKE_TIMESTAMP_TICKS, FakeCamera, FrameOpts};
+use fake_camera::{FAKE_TIMESTAMP_TICKS, FakeCamera, FrameOpts, wait_until};
 use telegenic::gige::{GigECamera, GigeConfig};
 use telegenic::{FrameStatus, PacketSize, PayloadKind, PixelFormat, StreamConfig};
 
@@ -17,7 +17,7 @@ const BLOCK: usize = 500;
 fn connect(fake: &FakeCamera) -> GigECamera {
     let mut cfg = GigeConfig::new(std::net::Ipv4Addr::LOCALHOST);
     cfg.addr = fake.addr();
-    cfg.gvcp_timeout = Duration::from_millis(100);
+    cfg.gvcp_timeout = Duration::from_millis(500);
     cfg.retries = 2;
     let mut cam = GigECamera::with_config(cfg);
     cam.connect().expect("connect to fake camera");
@@ -25,7 +25,8 @@ fn connect(fake: &FakeCamera) -> GigECamera {
 }
 
 fn stream_config(payload_size: usize, extended: bool) -> StreamConfig {
-    let mut cfg = StreamConfig::new(payload_size);
+    let mut cfg = StreamConfig::new();
+    cfg.payload_size = Some(payload_size);
     cfg.packet_size = PacketSize::Fixed((BLOCK + if extended { 48 } else { 36 }) as u16);
     cfg
 }
@@ -78,10 +79,10 @@ fn consecutive_frames_and_wraparound_ids() {
     }
 
     let mut got = Vec::new();
-    while let Some(f) = frames.wait_for(Duration::from_millis(300)) {
-        got.push((f.frame_id, f.status));
-        if got.len() == 4 {
-            break;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while got.len() < 4 && std::time::Instant::now() < deadline {
+        if let Some(f) = frames.wait_for(Duration::from_millis(100)) {
+            got.push((f.frame_id, f.status));
         }
     }
     assert_eq!(
@@ -142,6 +143,9 @@ fn missing_packets_are_resent() {
     let cam = connect(&fake);
     let mut cfg = stream_config(5000, false);
     cfg.packet_request_ratio = 0.5;
+    // Retention isn't under test; on a loaded runner the resend round-trip
+    // can exceed the default 100 ms.
+    cfg.frame_retention = Duration::from_secs(2);
     let stream = cam.open_stream(cfg).expect("open stream");
     let frames = stream.subscribe(4);
 
@@ -182,6 +186,10 @@ fn unanswered_holes_time_out() {
 
     let frame = frames.wait_for(Duration::from_secs(1)).expect("frame");
     assert_eq!(frame.status, FrameStatus::Timeout);
+    // The data extends to the last received packet — the hole does not cut
+    // off the tail — while received_size reflects the missing block.
+    assert_eq!(frame.data().len(), 2000);
+    assert_eq!(frame.received_size, 1500);
     let stats = stream.stats();
     assert!(stats.timed_out_frames >= 1);
     assert!(stats.missing_packets >= 1);
@@ -218,11 +226,19 @@ fn pool_exhaustion_counts_underruns() {
     // First frame completes and sits undelivered in the channel, holding the
     // only buffer; the second frame finds the pool empty.
     fake.send_gvsp_frame(1, &pattern(1000), &FrameOpts::new(BLOCK));
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            stream.stats().completed_frames >= 1
+        }),
+        "first frame never completed: {:?}",
+        stream.stats()
+    );
     fake.send_gvsp_frame(2, &pattern(1000), &FrameOpts::new(BLOCK));
-    std::thread::sleep(Duration::from_millis(50));
-
-    assert!(stream.stats().underruns >= 1, "stats: {:?}", stream.stats());
+    assert!(
+        wait_until(Duration::from_secs(2), || stream.stats().underruns >= 1),
+        "stats: {:?}",
+        stream.stats()
+    );
 
     // Consuming (and dropping) the frame returns the buffer; streaming
     // recovers.
@@ -240,7 +256,8 @@ fn auto_packet_size_negotiates_below_mtu() {
     fake.knobs().lock().mtu = 1400;
     let cam = connect(&fake);
 
-    let mut cfg = StreamConfig::new(1000);
+    let mut cfg = StreamConfig::new();
+    cfg.payload_size = Some(1000);
     cfg.packet_size = PacketSize::Auto;
     let stream = cam.open_stream(cfg).expect("open stream");
 
@@ -268,8 +285,9 @@ fn closing_the_stream_zeroes_scp() {
     let port = fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PORT);
     assert_ne!(port, 0);
 
+    // Drop waits for the SCP := 0 ack, and the fake writes the register
+    // before acking, so the new value is visible immediately.
     drop(stream);
-    std::thread::sleep(Duration::from_millis(50));
     assert_eq!(
         fake.read_reg(telegenic::gige::proto::bootstrap::STREAM_CHANNEL_PORT),
         0

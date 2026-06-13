@@ -42,20 +42,19 @@ fn main() {
         Err(e) => println!("  ExposureTime: {e}"),
     }
 
-    let stream = cam
-        .start_acquisition(StreamConfig::new(0))
+    let acq = cam
+        .start_acquisition(StreamConfig::new())
         .expect("start acquisition");
     println!(
         "streaming to {} with packet size {}",
-        stream.local_addr(),
-        stream.packet_size()
+        acq.local_addr(),
+        acq.packet_size()
     );
-    let frames = stream.subscribe(16);
 
     let mut received = 0usize;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while received < n_frames && std::time::Instant::now() < deadline {
-        let Some(frame) = frames.wait_for(Duration::from_millis(500)) else {
+        let Some(frame) = acq.wait_for(Duration::from_millis(500)) else {
             continue;
         };
         received += 1;
@@ -74,8 +73,9 @@ fn main() {
         );
     }
 
-    cam.stop_acquisition().expect("stop acquisition");
-    println!("stream stats: {:#?}", stream.stats());
+    let stats = acq.stats();
+    acq.stop().expect("stop acquisition");
+    println!("stream stats: {stats:#?}");
     println!("link stats: {:?}", cam.transport().stats().expect("stats"));
     assert!(received > 0, "no frames received");
 }

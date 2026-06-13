@@ -38,9 +38,9 @@ pub struct StreamConfig {
     /// Stream channel index; almost always 0.
     pub channel: u16,
     /// Frame buffer size in bytes — the device's `PayloadSize` feature.
-    /// [`GenICamera::start_acquisition`](crate::GenICamera) fills this in;
-    /// transport-level users supply it themselves.
-    pub payload_size: usize,
+    /// `None` lets the feature layer fill it in from the device;
+    /// transport-level users must supply it themselves.
+    pub payload_size: Option<usize>,
     /// Buffers in the pool. Frames arriving while every buffer is held
     /// (filling or undelivered) are counted as underruns and dropped.
     pub n_buffers: usize,
@@ -65,11 +65,17 @@ pub struct StreamConfig {
     pub thread_cfg: ThreadConfig,
 }
 
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamConfig {
-    pub fn new(payload_size: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             channel: 0,
-            payload_size,
+            payload_size: None,
             n_buffers: 8,
             packet_size: PacketSize::Auto,
             packet_delay: None,
@@ -170,7 +176,6 @@ pub(crate) struct StreamShared {
 
 /// An open stream channel. Owns the receiver worker; dropping the handle
 /// stops the worker and closes the channel on the device (SCP := 0).
-#[cfg_attr(feature = "py", pyo3::pyclass(skip_from_py_object))]
 pub struct StreamChannel {
     pub(crate) to_worker: flume::Sender<runner::ToStreamWorker>,
     pub(crate) thread: ThreadHandle,
@@ -222,10 +227,13 @@ impl StreamChannel {
 
 impl Drop for StreamChannel {
     fn drop(&mut self) {
-        drop(
-            self.control
-                .write_register(bootstrap::STREAM_CHANNEL_PORT + self.channel_base, 0),
-        );
+        // Wait (bounded) for the SCP := 0 ack so the device has stopped
+        // transmitting before the receiving socket closes — otherwise every
+        // in-flight packet triggers an ICMP port-unreachable.
+        let _ = self
+            .control
+            .write_register(bootstrap::STREAM_CHANNEL_PORT + self.channel_base, 0)
+            .wait_timeout(self.control.budget());
         let _ = self.to_worker.send(runner::ToStreamWorker::Shutdown);
         self.thread.wake().ok();
         // ThreadHandle::drop joins the worker.

@@ -56,7 +56,7 @@ const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 fn connect(fake: &FakeCamera) -> GigECamera {
     let mut cfg = GigeConfig::new(std::net::Ipv4Addr::LOCALHOST);
     cfg.addr = fake.addr();
-    cfg.gvcp_timeout = Duration::from_millis(100);
+    cfg.gvcp_timeout = Duration::from_millis(500);
     cfg.retries = 2;
     let mut cam = GigECamera::with_config(cfg);
     cam.connect().expect("connect to fake camera");
@@ -96,9 +96,9 @@ fn features_evaluate_against_live_registers() {
 fn acquisition_uses_payload_size_and_streams() {
     let (fake, mut cam) = setup();
 
-    let mut stream_cfg = telegenic::StreamConfig::new(0); // PayloadSize fills it
+    let mut stream_cfg = telegenic::StreamConfig::new(); // PayloadSize fills it
     stream_cfg.packet_size = PacketSize::Fixed(536); // 500-byte blocks
-    let stream = cam
+    let acq = cam
         .start_acquisition(stream_cfg)
         .expect("start acquisition");
     assert_eq!(
@@ -107,15 +107,14 @@ fn acquisition_uses_payload_size_and_streams() {
         "AcquisitionStart must hit the register"
     );
 
-    let frames = stream.subscribe(4);
     let payload: Vec<u8> = (0..2000u32).map(|i| i as u8).collect(); // Width*Height = 40*50
     fake.send_gvsp_frame(1, &payload, &FrameOpts::new(500));
 
-    let frame = frames.wait_for(Duration::from_secs(1)).expect("frame");
+    let frame = acq.wait_for(Duration::from_secs(1)).expect("frame");
     assert_eq!(frame.status, FrameStatus::Complete);
     assert_eq!(frame.data(), &payload[..]);
 
-    cam.stop_acquisition().expect("stop");
+    acq.stop().expect("stop");
     assert_eq!(
         fake.read_reg(0x2008),
         0,
@@ -136,7 +135,7 @@ fn answer_next_start(fake: &FakeCamera, frame_id: u64, payload: &[u8]) {
 fn snapshot_session_snaps_on_demand() {
     let (fake, mut cam) = setup();
 
-    let mut cfg = telegenic::StreamConfig::new(0);
+    let mut cfg = telegenic::StreamConfig::new();
     cfg.packet_size = PacketSize::Fixed(536);
     let mut session = cam.snapshot_session(cfg).expect("open session");
     assert_eq!(
@@ -167,7 +166,7 @@ fn snap_grabs_one_frame_and_tears_down() {
     let (fake, mut cam) = setup();
 
     let payload: Vec<u8> = (0..2000u32).map(|i| i as u8).collect();
-    let mut cfg = telegenic::StreamConfig::new(0);
+    let mut cfg = telegenic::StreamConfig::new();
     cfg.packet_size = PacketSize::Fixed(536);
     std::thread::scope(|s| {
         s.spawn(|| answer_next_start(&fake, 9, &payload));

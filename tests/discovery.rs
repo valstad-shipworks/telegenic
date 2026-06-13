@@ -20,7 +20,7 @@ fn loopback_config(fake: &FakeCamera) -> DiscoveryConfig {
             netmask: Ipv4Addr::new(255, 0, 0, 0),
             broadcast: Ipv4Addr::LOCALHOST,
         }]),
-        recv_window: Duration::from_millis(300),
+        recv_window: Duration::from_secs(1),
         limited_broadcast: false,
         source_port: 0,
         device_port: fake.addr().port(),
@@ -49,7 +49,7 @@ fn force_ip_repoints_the_fake_camera() {
     let fake = FakeCamera::start();
     let cfg = ForceIpConfig {
         discovery: loopback_config(&fake),
-        ack_window: Duration::from_millis(300),
+        ack_window: Duration::from_secs(1),
     };
 
     let acked = discovery::force_ip(

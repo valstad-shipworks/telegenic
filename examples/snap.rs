@@ -20,7 +20,7 @@ fn main() {
     cam.connect().expect("connect");
 
     let mut session = cam
-        .snapshot_session(StreamConfig::new(0))
+        .snapshot_session(StreamConfig::new())
         .expect("open snapshot session");
     println!(
         "session open on {} (packet size {}), camera idle",

@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use telegenic::{FrameChannel, FrameStatus, GenICamera, PixelFormat, StreamChannel, StreamConfig};
+use telegenic::{FrameChannel, FrameStatus, GenICamera, PixelFormat, StreamConfig};
 
 const EXPOSURE_US: f64 = 10_000.0;
 const GAIN: f64 = 30.0;
@@ -47,25 +47,33 @@ fn main() -> eframe::Result {
         }
     }
 
-    let mut cfg = StreamConfig::new(0);
+    let mut cfg = StreamConfig::new();
     cfg.n_buffers = 16;
-    let stream = cam.start_acquisition(cfg).expect("start acquisition");
+    let acq = cam.start_acquisition(cfg).expect("start acquisition");
     println!(
         "streaming to {} with packet size {}",
-        stream.local_addr(),
-        stream.packet_size()
+        acq.local_addr(),
+        acq.packet_size()
     );
-    let frames = stream.subscribe(4);
+    // The acquisition guard borrows the camera, so it stays on this stack
+    // frame while the UI runs; the app only needs a channel clone.
+    let frames = acq.frames().clone();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 1080.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "telegenic viewer",
         options,
-        Box::new(move |_cc| Ok(Box::new(Viewer::new(cam, stream, frames)))),
-    )
+        Box::new(move |_cc| Ok(Box::new(Viewer::new(frames)))),
+    );
+
+    println!("stream stats: {:#?}", acq.stats());
+    if let Err(e) = acq.stop() {
+        println!("stop acquisition: {e}");
+    }
+    result
 }
 
 /// Camera features come as Float or Integer depending on the vendor.
@@ -80,8 +88,6 @@ fn set_number(cam: &mut GenICamera, name: &str, value: f64) {
 }
 
 struct Viewer {
-    cam: GenICamera,
-    stream: StreamChannel,
     frames: FrameChannel,
     texture: Option<egui::TextureHandle>,
     frame_info: String,
@@ -92,10 +98,8 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(cam: GenICamera, stream: StreamChannel, frames: FrameChannel) -> Self {
+    fn new(frames: FrameChannel) -> Self {
         Self {
-            cam,
-            stream,
             frames,
             texture: None,
             frame_info: String::new(),
@@ -157,20 +161,10 @@ impl eframe::App for Viewer {
         self.poll_frames(&ctx);
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            let stats = self.stream.stats();
             ui.horizontal(|ui| {
                 ui.label(format!("{:.1} fps", self.fps));
                 ui.separator();
                 ui.label(&self.frame_info);
-                ui.separator();
-                ui.label(format!(
-                    "complete {}  dropped {}  underruns {}  resends {}  missing {}",
-                    stats.completed_frames,
-                    stats.frames_dropped,
-                    stats.underruns,
-                    stats.resend_requests,
-                    stats.missing_packets,
-                ));
             });
             ui.separator();
             if let Some(texture) = &self.texture {
@@ -186,20 +180,10 @@ impl eframe::App for Viewer {
 
         if self.last_log.elapsed() >= Duration::from_secs(2) {
             self.last_log = Instant::now();
-            let stats = self.stream.stats();
-            println!(
-                "{:.1} fps  complete {}  dropped {}  underruns {}",
-                self.fps, stats.completed_frames, stats.frames_dropped, stats.underruns
-            );
+            println!("{:.1} fps  {}", self.fps, self.frame_info);
         }
 
         // Poll continuously for new frames.
         ctx.request_repaint();
-    }
-
-    fn on_exit(&mut self) {
-        if let Err(e) = self.cam.stop_acquisition() {
-            println!("stop acquisition: {e}");
-        }
     }
 }

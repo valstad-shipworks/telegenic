@@ -16,16 +16,16 @@ cam.set_float("ExposureTime", 5000.0)?;
 cam.set_enum("PixelFormat", "Mono8")?;
 
 // One frame on demand — zero stream bandwidth between captures:
-let frame = cam.snap(StreamConfig::new(0), std::time::Duration::from_secs(5))?;
+let frame = cam.snap(StreamConfig::new(), std::time::Duration::from_secs(5))?;
 println!("{}x{} {}", frame.width, frame.height, frame.pixel_format);
 
-// Or continuous acquisition:
-let stream = cam.start_acquisition(StreamConfig::new(0))?;
-let frames = stream.subscribe(16);
-while let Some(frame) = frames.wait_for(std::time::Duration::from_secs(1)) {
+// Or continuous acquisition. The guard subscribes before the camera
+// starts (so even the first frame is delivered) and stops it on drop:
+let acq = cam.start_acquisition(StreamConfig::new())?;
+while let Some(frame) = acq.wait_for(std::time::Duration::from_secs(1)) {
     println!("{}x{} {}", frame.width, frame.height, frame.pixel_format);
 }
-cam.stop_acquisition()?;
+acq.stop()?; // or just drop it
 cam.disconnect(std::time::Duration::from_millis(500)); // or just drop it
 # Ok::<(), telegenic::GenicamError>(())
 ```
@@ -43,9 +43,10 @@ methods return `Disconnected` while no link is up.
   String-keyed typed feature access over the node graph from the device's
   XML (zipped or plain), Converter/SwissKnife formula evaluation, register
   caching with pInvalidator handling, and acquisition tied together for you:
-  `start_acquisition`/`stop_acquisition` for continuous streaming,
-  `snap`/`snapshot_session` for on-demand single-frame capture with the
-  camera idle between shots.
+  `start_acquisition` returns an RAII guard for continuous streaming,
+  `snap`/`snapshot_session` capture single frames on demand with the camera
+  idle between shots. Both guards borrow the camera mutably, so stopping is
+  automatic and disconnecting mid-acquisition cannot compile.
 - **`gige`**: the GigE Vision backend.
   - `gige::discovery`: broadcast device discovery per network adapter, plus
     Force IP for repointing a camera whose address doesn't match the local
@@ -79,10 +80,11 @@ with cam.snapshot_session() as session:   # camera idle between snaps
     frame = session.snap(timeout=5.0)
     print(frame.width, frame.height, frame.pixel_format)
 
-stream = cam.start_acquisition()          # continuous; keep `stream` alive
-for frame in stream.subscribe(16):
-    print(frame)
-cam.stop_acquisition()
+with cam.start_acquisition() as acq:   # stops the camera again on exit
+    for _ in range(100):
+        frame = acq.wait_for(timeout=1.0)
+        if frame is not None:
+            print(frame)
 ```
 
 `telegenic.discover()` finds cameras on the local subnets. Type stubs and
@@ -96,6 +98,7 @@ cargo run --example force_ip <mac> <ip> <mask> <gw>
 cargo run --example info <camera-ip>          # identity + GenICam URL
 cargo run --example snap <camera-ip> [n]      # n on-demand single frames
 cargo run --example grab <camera-ip> [n]      # stream n frames
+python examples/grab.py <camera-ip> [n]       # the same, via the bindings
 ```
 
 ## Testing

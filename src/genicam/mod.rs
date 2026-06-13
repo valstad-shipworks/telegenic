@@ -3,6 +3,7 @@
 //! AcquisitionStart, ...) by name, evaluated through the device-description
 //! XML's node graph.
 
+mod acquisition;
 pub mod evaluator;
 pub(crate) mod node;
 pub mod port;
@@ -17,8 +18,9 @@ use std::time::Duration;
 
 use crate::error::{GenicamError, GenicamResult};
 use crate::gige::GigECamera;
-use crate::gige::stream::{Frame, StreamChannel, StreamConfig};
+use crate::gige::stream::{Frame, StreamConfig};
 
+pub use acquisition::Acquisition;
 pub use node::{AccessMode, Genicam, NodeId};
 pub use snapshot::SnapshotSession;
 pub use url::XmlUrl;
@@ -200,27 +202,19 @@ impl GenICamera {
         Ok(())
     }
 
-    /// Open the stream and start acquisition: fills `payload_size` from the
-    /// device's `PayloadSize` if unset, opens the GVSP channel, sets
+    /// Start continuous acquisition: fills `payload_size` from the device's
+    /// `PayloadSize` if unset, opens the GVSP channel, subscribes, sets
     /// `TLParamsLocked`, and executes `AcquisitionStart`.
-    pub fn start_acquisition(&mut self, mut cfg: StreamConfig) -> GenicamResult<StreamChannel> {
-        self.fill_payload_size(&mut cfg)?;
-        let stream = self.transport().open_stream(cfg)?;
-        if let Err(e) = self.set_integer("TLParamsLocked", 1) {
-            tracing::debug!("TLParamsLocked not set: {e}");
-        }
-        self.execute("AcquisitionStart")?;
-        Ok(stream)
-    }
-
-    /// Stop acquisition and unlock transport parameters. Drop the
-    /// [`StreamChannel`] separately to close the stream channel.
-    pub fn stop_acquisition(&mut self) -> GenicamResult<()> {
-        self.execute("AcquisitionStop")?;
-        if let Err(e) = self.set_integer("TLParamsLocked", 0) {
-            tracing::debug!("TLParamsLocked not cleared: {e}");
-        }
-        Ok(())
+    ///
+    /// The returned [`Acquisition`] guard owns the whole lifecycle — its
+    /// subscription exists before the camera is told to start (so even the
+    /// first frame is delivered), and dropping it stops the camera, unlocks
+    /// transport parameters, and closes the stream channel. The guard
+    /// borrows the camera mutably: feature access while acquiring goes
+    /// through [`Acquisition::camera`], and disconnecting or opening a
+    /// snapshot session mid-acquisition is rejected at compile time.
+    pub fn start_acquisition(&mut self, cfg: StreamConfig) -> GenicamResult<Acquisition<'_>> {
+        Acquisition::start(self, cfg)
     }
 
     /// Capture exactly one frame, opening and closing the stream around it.
@@ -245,11 +239,99 @@ impl GenICamera {
         SnapshotSession::open(self, cfg)
     }
 
-    fn fill_payload_size(&mut self, cfg: &mut StreamConfig) -> GenicamResult<()> {
-        if cfg.payload_size == 0 {
-            cfg.payload_size = usize::try_from(self.get_integer("PayloadSize")?)
-                .map_err(|_| GenicamError::Xml("negative PayloadSize".into()))?;
+    pub(crate) fn fill_payload_size(&mut self, cfg: &mut StreamConfig) -> GenicamResult<()> {
+        if cfg.payload_size.is_none() {
+            cfg.payload_size = Some(
+                usize::try_from(self.get_integer("PayloadSize")?)
+                    .map_err(|_| GenicamError::Xml("negative PayloadSize".into()))?,
+            );
         }
         Ok(())
+    }
+}
+
+/// Mutable feature-tree access without the lifecycle methods, handed out by
+/// the acquisition guards ([`Acquisition::features`],
+/// [`SnapshotSession::features`]): tuning `ExposureTime` mid-stream is fine,
+/// disconnecting mid-stream is not.
+#[derive(Debug)]
+pub struct Features<'a>(pub(crate) &'a mut GenICamera);
+
+impl Features<'_> {
+    pub fn has_feature(&self, name: &str) -> bool {
+        self.0.has_feature(name)
+    }
+
+    pub fn feature_names(&self) -> GenicamResult<Vec<String>> {
+        self.0.feature_names()
+    }
+
+    pub fn get_integer(&mut self, name: &str) -> GenicamResult<i64> {
+        self.0.get_integer(name)
+    }
+
+    pub fn set_integer(&mut self, name: &str, value: i64) -> GenicamResult<()> {
+        self.0.set_integer(name, value)
+    }
+
+    pub fn integer_bounds(&mut self, name: &str) -> GenicamResult<(i64, i64)> {
+        self.0.integer_bounds(name)
+    }
+
+    pub fn integer_increment(&mut self, name: &str) -> GenicamResult<i64> {
+        self.0.integer_increment(name)
+    }
+
+    pub fn get_float(&mut self, name: &str) -> GenicamResult<f64> {
+        self.0.get_float(name)
+    }
+
+    pub fn set_float(&mut self, name: &str, value: f64) -> GenicamResult<()> {
+        self.0.set_float(name, value)
+    }
+
+    pub fn float_bounds(&mut self, name: &str) -> GenicamResult<(f64, f64)> {
+        self.0.float_bounds(name)
+    }
+
+    pub fn get_boolean(&mut self, name: &str) -> GenicamResult<bool> {
+        self.0.get_boolean(name)
+    }
+
+    pub fn set_boolean(&mut self, name: &str, value: bool) -> GenicamResult<()> {
+        self.0.set_boolean(name, value)
+    }
+
+    pub fn get_string(&mut self, name: &str) -> GenicamResult<String> {
+        self.0.get_string(name)
+    }
+
+    pub fn set_string(&mut self, name: &str, value: &str) -> GenicamResult<()> {
+        self.0.set_string(name, value)
+    }
+
+    pub fn get_enum(&mut self, name: &str) -> GenicamResult<String> {
+        self.0.get_enum(name)
+    }
+
+    pub fn set_enum(&mut self, name: &str, entry: &str) -> GenicamResult<()> {
+        self.0.set_enum(name, entry)
+    }
+
+    pub fn enum_entries(&mut self, name: &str) -> GenicamResult<Vec<String>> {
+        self.0.enum_entries(name)
+    }
+
+    /// Execute a command feature (e.g. `TriggerSoftware`).
+    pub fn execute(&mut self, name: &str) -> GenicamResult<()> {
+        self.0.execute(name)
+    }
+
+    pub fn access_mode(&mut self, name: &str) -> GenicamResult<AccessMode> {
+        self.0.access_mode(name)
+    }
+
+    pub fn invalidate_caches(&mut self) -> GenicamResult<()> {
+        self.0.invalidate_caches()
     }
 }

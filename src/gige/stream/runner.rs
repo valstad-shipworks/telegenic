@@ -44,6 +44,8 @@ struct FrameInFlight {
     /// Highest packet id such that 0..=it are all received; -1 initially.
     last_valid_packet: i64,
     received_size: usize,
+    /// Highest `offset + len` written so far; the frame's data extent.
+    data_end: usize,
     last_packet_time: Instant,
     leader: Option<ImageLeader>,
     system_timestamp_ns: u64,
@@ -66,8 +68,10 @@ pub(crate) struct StreamRunner {
     pool: FramePool,
     frames: Vec<FrameInFlight>,
     subscribers: Vec<flume::Sender<Arc<Frame>>>,
+    shutdown_requested: bool,
     stats: StreamStats,
     scps_packet_size: usize,
+    payload_size: usize,
     resend_enabled: bool,
     resend_id: u16,
     resend_buf: [u8; gvcp::RESEND_MAX_LEN],
@@ -97,13 +101,17 @@ impl StreamRunner {
                 tracing::error!("gvsp worker poll error: {e}");
                 break;
             }
+            // Commands before packets: a Subscribe sent before a frame's
+            // datagrams must be registered before that frame can complete,
+            // or the frame fans out to nobody and is lost.
+            self.drain_commands();
+            if self.shutdown_requested {
+                break;
+            }
             for ev in events.iter() {
                 if ev.token() == TOK_SOCKET {
                     self.drain_socket(&mut buf);
                 }
-            }
-            if self.drain_commands() {
-                break;
             }
             self.check_frame_completion(Instant::now(), None);
             self.publish_stats();
@@ -119,12 +127,12 @@ impl StreamRunner {
         *self.shared.stats.lock() = self.stats;
     }
 
-    fn drain_commands(&mut self) -> bool {
+    fn drain_commands(&mut self) {
         loop {
             match self.rx.try_recv() {
                 Ok(ToStreamWorker::Subscribe(tx)) => self.subscribers.push(tx),
-                Ok(ToStreamWorker::Shutdown) => return true,
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return false,
+                Ok(ToStreamWorker::Shutdown) => self.shutdown_requested = true,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
             }
         }
     }
@@ -250,7 +258,10 @@ impl StreamRunner {
         }
 
         let Some(mut slot) = self.pool.try_claim() else {
+            // Advance the id so the frame's remaining packets are discarded
+            // as late instead of each counting another underrun.
             self.stats.underruns += 1;
+            self.last_frame_id = view.frame_id;
             return None;
         };
         slot.reset(n_packets);
@@ -277,6 +288,7 @@ impl StreamRunner {
             trailer_seen: false,
             last_valid_packet: -1,
             received_size: 0,
+            data_end: 0,
             last_packet_time: now,
             leader: None,
             system_timestamp_ns: 0,
@@ -297,7 +309,7 @@ impl StreamRunner {
         if block_size == 0 {
             return 0;
         }
-        let payload_packets = self.cfg.payload_size.div_ceil(block_size);
+        let payload_packets = self.payload_size.div_ceil(block_size);
         match view.content_type {
             ContentType::Leader => {
                 let payload_type = ImageLeader::parse(view.data).map(|l| l.payload_type);
@@ -347,7 +359,7 @@ impl StreamRunner {
             if view.data.len() != frame.block_size {
                 frame.block_size = view.data.len();
                 if !frame.trailer_seen {
-                    frame.n_packets = self.cfg.payload_size.div_ceil(frame.block_size) + 2;
+                    frame.n_packets = self.payload_size.div_ceil(frame.block_size) + 2;
                     frame
                         .slot
                         .packets
@@ -383,6 +395,7 @@ impl StreamRunner {
         }
         frame.slot.data[offset..offset + data.len()].copy_from_slice(data);
         frame.received_size += data.len();
+        frame.data_end = frame.data_end.max(offset + data.len());
     }
 
     fn process_trailer(&mut self, index: usize, view: &GvspView<'_>) {
@@ -466,7 +479,13 @@ impl StreamRunner {
 
     fn send_resend_request(&mut self, frame_id: u64, first: u32, last: u32, extended_ids: bool) {
         tracing::trace!(frame_id, first, last, "requesting packet resend");
-        self.resend_id = gvcp::next_id(self.resend_id);
+        // Private wrap, back to the seed: resend ids must stay out of the
+        // control worker's 1..=0xfffe range.
+        self.resend_id = if self.resend_id == u16::MAX {
+            RESEND_ID_SEED
+        } else {
+            self.resend_id + 1
+        };
         let len = gvcp::encode_packet_resend(
             &mut self.resend_buf,
             frame_id,
@@ -490,13 +509,15 @@ impl StreamRunner {
         while index < self.frames.len() {
             let frame = &self.frames[index];
 
-            if can_close && !self.resend_enabled && self.frames.len() > index + 1 {
-                self.close_frame(index, FrameStatus::MissingPackets);
-                continue;
-            }
             if can_close && frame.last_valid_packet == frame.n_packets as i64 - 1 {
                 let status = frame.error.unwrap_or(FrameStatus::Complete);
                 self.close_frame(index, status);
+                continue;
+            }
+            // Completeness is tested first: a head frame whose last packet
+            // arrived after a newer frame opened is still a good frame.
+            if can_close && !self.resend_enabled && self.frames.len() > index + 1 {
+                self.close_frame(index, FrameStatus::MissingPackets);
                 continue;
             }
             // Never time out the newest frame whose only packet so far is
@@ -523,6 +544,10 @@ impl StreamRunner {
     }
 
     fn close_frame(&mut self, index: usize, status: FrameStatus) {
+        // A Subscribe can land while drain_socket is mid-pass; pick it up
+        // here so a subscription sent before this frame's packets arrived
+        // never misses the frame.
+        self.drain_commands();
         let frame = self.frames.remove(index);
         if status != FrameStatus::Complete {
             tracing::trace!(
@@ -577,9 +602,13 @@ impl StreamRunner {
             timestamp_ns,
             system_timestamp_ns: frame.system_timestamp_ns,
             received_size: frame.received_size,
+            data_end: frame.data_end,
             data: PooledBuf::new(frame.slot, self.pool.returner()),
         };
         let out = Arc::new(out);
+        // Publish before fan-out so a subscriber that wakes on this frame
+        // already sees it reflected in the stats snapshot.
+        self.publish_stats();
         let mut dropped = 0u64;
         self.subscribers
             .retain(|tx| match tx.try_send(out.clone()) {
@@ -590,7 +619,10 @@ impl StreamRunner {
                 }
                 Err(flume::TrySendError::Disconnected(_)) => false,
             });
-        self.stats.frames_dropped += dropped;
+        if dropped > 0 {
+            self.stats.frames_dropped += dropped;
+            self.publish_stats();
+        }
     }
 
     fn flush_frames(&mut self) {
@@ -604,6 +636,9 @@ impl StreamRunner {
 pub(crate) struct LinkParams {
     pub device_gvcp_addr: SocketAddr,
     pub scps_packet_size: u16,
+    /// Resolved frame buffer size (`StreamConfig::payload_size` is optional
+    /// at the API surface; it is mandatory by the time a worker spawns).
+    pub payload_size: usize,
     pub resend_enabled: bool,
     pub tick_frequency: u64,
 }
@@ -634,7 +669,7 @@ pub(crate) fn spawn(
     thread.set_waker(waker);
     let thread_for_worker = thread.to_pass_in();
 
-    let pool = FramePool::new(cfg.n_buffers, cfg.payload_size);
+    let pool = FramePool::new(cfg.n_buffers, link.payload_size);
     let join = snare::thread::Builder::new()
         .name(format!("telegenic-gvsp{}", cfg.channel))
         .spawn(move || {
@@ -647,8 +682,10 @@ pub(crate) fn spawn(
                 pool,
                 frames: Vec::with_capacity(4),
                 subscribers: Vec::new(),
+                shutdown_requested: false,
                 stats: StreamStats::default(),
                 scps_packet_size: usize::from(link.scps_packet_size),
+                payload_size: link.payload_size,
                 resend_enabled: link.resend_enabled,
                 resend_id: RESEND_ID_SEED,
                 resend_buf: [0u8; gvcp::RESEND_MAX_LEN],

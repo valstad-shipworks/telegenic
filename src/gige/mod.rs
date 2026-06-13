@@ -36,11 +36,11 @@ pub use proto::gvsp::PixelFormat;
 
 /// Best-effort SO_RCVBUF sizing for the stream socket; bursts of a full
 /// frame must fit between two worker wakeups.
-fn set_receive_buffer(socket: &std::net::UdpSocket, cfg: &StreamConfig) {
+fn set_receive_buffer(socket: &std::net::UdpSocket, cfg: &StreamConfig, payload_size: usize) {
     let request = if cfg.socket_buffer != 0 {
         cfg.socket_buffer
     } else {
-        (cfg.payload_size + 1024).clamp(256 * 1024, 8 * 1024 * 1024)
+        (payload_size + 1024).clamp(256 * 1024, 8 * 1024 * 1024)
     };
     #[cfg(unix)]
     {
@@ -248,6 +248,13 @@ impl ControlPort {
             .send(msg)
             .map_err(|_| CameraError::Disconnected)?;
         self.thread.wake().ok();
+        // The worker may have died between the send and now, with its
+        // shutdown drain already past. Its handle fulfilment is idempotent,
+        // so failing here too is safe — and guarantees no handle is left
+        // pending forever.
+        if !self.thread.is_alive() {
+            return Err(CameraError::Disconnected);
+        }
         Ok(())
     }
 
@@ -563,9 +570,10 @@ impl GigECamera {
     /// `AcquisitionStart` feature, or
     /// [`GenICamera::start_acquisition`](crate::GenICamera)).
     pub fn open_stream(&self, cfg: StreamConfig) -> Result<StreamChannel> {
-        if cfg.payload_size == 0 {
-            return Err(CameraError::Protocol("payload_size must be set".into()));
-        }
+        let payload_size = cfg
+            .payload_size
+            .filter(|&n| n > 0)
+            .ok_or_else(|| CameraError::Protocol("payload_size must be set".into()))?;
         let conn = self.conn()?;
         let port = &conn.port;
         let budget = port.budget();
@@ -584,7 +592,7 @@ impl GigECamera {
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));
         };
-        set_receive_buffer(&socket, &cfg);
+        set_receive_buffer(&socket, &cfg, payload_size);
 
         port.write_register(
             bootstrap::STREAM_CHANNEL_DEST_ADDRESS + base,
@@ -639,6 +647,7 @@ impl GigECamera {
             crate::gige::stream::runner::LinkParams {
                 device_gvcp_addr: conn.device_addr,
                 scps_packet_size: packet_size,
+                payload_size,
                 resend_enabled,
                 tick_frequency,
             },
@@ -974,6 +983,10 @@ fn negotiate_packet_size(
     port.write_register(scps_addr, u32::from(size))
         .wait_timeout(budget)
         .map_err(unwrap_arc)?;
+    // A test packet can land after its probe stopped listening; drain such
+    // residue so the stream worker doesn't mistake it for frame data.
+    socket.set_read_timeout(Some(Duration::from_millis(5))).ok();
+    while socket.recv_from(&mut buf).is_ok() {}
     tracing::debug!("negotiated stream packet size {size}");
     Ok(size)
 }
