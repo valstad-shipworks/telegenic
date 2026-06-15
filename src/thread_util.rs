@@ -75,9 +75,8 @@ impl ThreadConfig {
                         ),
                     ));
                 }
-                let param = libc::sched_param {
-                    sched_priority: self.priority,
-                };
+                let mut param: libc::sched_param = std::mem::zeroed();
+                param.sched_priority = self.priority;
                 let rc =
                     libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
                 if rc != 0 {
