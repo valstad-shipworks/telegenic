@@ -36,7 +36,7 @@ pub use proto::gvsp::PixelFormat;
 
 /// Best-effort SO_RCVBUF sizing for the stream socket; bursts of a full
 /// frame must fit between two worker wakeups.
-fn set_receive_buffer(socket: &std::net::UdpSocket, cfg: &StreamConfig, payload_size: usize) {
+fn set_receive_buffer(socket: &snare::net::UdpSocket, cfg: &StreamConfig, payload_size: usize) {
     let request = if cfg.socket_buffer != 0 {
         cfg.socket_buffer
     } else {
@@ -519,7 +519,7 @@ impl GigECamera {
             return Err(CameraError::Unsupported("message channel events"));
         }
         let ip = if conn.local_addr.ip().is_unspecified() {
-            let probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+            let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
             probe.connect(conn.device_addr)?;
             probe.local_addr()?.ip()
         } else {
@@ -582,12 +582,12 @@ impl GigECamera {
         let local = match cfg.local_addr {
             Some(a) => a,
             None => {
-                let probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+                let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
                 probe.connect(conn.device_addr)?;
                 SocketAddr::new(probe.local_addr()?.ip(), 0)
             }
         };
-        let socket = std::net::UdpSocket::bind(local)?;
+        let socket = snare::net::UdpSocket::bind(local)?;
         let bound = socket.local_addr()?;
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));
@@ -905,7 +905,7 @@ fn fetch_genicam_xml(port: &ControlPort, url_addr: u32) -> Result<Arc<[u8]>> {
 fn negotiate_packet_size(
     port: &ControlPort,
     device_ip: IpAddr,
-    socket: &std::net::UdpSocket,
+    socket: &snare::net::UdpSocket,
     scps_addr: u32,
 ) -> Result<u16> {
     // Probes are 16-aligned: devices round requests down to their own
