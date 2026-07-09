@@ -32,6 +32,8 @@
     )
 )]
 
+#[cfg(feature = "emulator")]
+pub mod emulator;
 pub mod error;
 pub mod genicam;
 pub mod gige;

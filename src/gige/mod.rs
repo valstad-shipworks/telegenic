@@ -518,14 +518,7 @@ impl GigECamera {
         if conn.capabilities & bootstrap::CAP_EVENT == 0 {
             return Err(CameraError::Unsupported("message channel events"));
         }
-        let ip = if conn.local_addr.ip().is_unspecified() {
-            let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
-            probe.connect(conn.device_addr)?;
-            probe.local_addr()?.ip()
-        } else {
-            conn.local_addr.ip()
-        };
-        let IpAddr::V4(host_v4) = ip else {
+        let IpAddr::V4(host_v4) = advertised_host_ip(conn)? else {
             return Err(CameraError::Unsupported(
                 "IPv6 message channel destinations",
             ));
@@ -581,17 +574,19 @@ impl GigECamera {
 
         let local = match cfg.local_addr {
             Some(a) => a,
-            None => {
-                let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
-                probe.connect(conn.device_addr)?;
-                SocketAddr::new(probe.local_addr()?.ip(), 0)
-            }
+            None => SocketAddr::new(advertised_host_ip(conn)?, 0),
         };
         let socket = snare::net::UdpSocket::bind(local)?;
         let bound = socket.local_addr()?;
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));
         };
+        if host_v4.is_unspecified() {
+            tracing::debug!(
+                local = %bound,
+                "stream host IP unresolved; advertising SCDA=0 (device streams to the GVCP requester)"
+            );
+        }
         set_receive_buffer(&socket, &cfg, payload_size);
 
         port.write_register(
@@ -724,6 +719,22 @@ impl GigECamera {
     pub(crate) fn genicam_ref(&self) -> Option<&crate::genicam::Genicam> {
         self.connection.as_ref()?.genicam.as_ref()
     }
+}
+
+/// The host IP to advertise to the device for a return channel (GVSP stream
+/// or message channel). Prefers the control socket's bound IP — it provably
+/// reaches the device — then a probe socket, whose `connect` a real kernel
+/// resolves to the outbound interface's address. On a host that only has
+/// wildcard binds (e.g. a virtual network shim) both stay unspecified; the
+/// caller then advertises an address of 0 and relies on the device streaming
+/// back to the GVCP requester (see `GigeDevice::stream_dest`).
+fn advertised_host_ip(conn: &Connection) -> Result<IpAddr> {
+    if !conn.local_addr.ip().is_unspecified() {
+        return Ok(conn.local_addr.ip());
+    }
+    let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
+    probe.connect(conn.device_addr)?;
+    Ok(probe.local_addr()?.ip())
 }
 
 /// Dial and bootstrap one connection. On any failure the worker is torn
