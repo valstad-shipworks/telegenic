@@ -16,7 +16,8 @@ use snare::mio::Waker;
 /// - `priority < 1` → SCHED_OTHER (normal scheduling).
 /// - `priority >= 1` → SCHED_FIFO with the given real-time priority.
 /// - `cpu_affinity = Some(n)` pins the worker to logical CPU `n`.
-#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct ThreadConfig {
     pub priority: i32,
     pub cpu_affinity: Option<usize>,

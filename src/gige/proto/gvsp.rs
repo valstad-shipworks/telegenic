@@ -25,7 +25,8 @@ pub fn packet_protocol_overhead(extended_ids: bool) -> usize {
     PACKET_UDP_OVERHEAD + 2 + if extended_ids { 18 } else { 6 }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ContentType {
     Leader,
     Trailer,
@@ -55,7 +56,8 @@ impl ContentType {
 }
 
 /// A zero-copy view over one GVSP datagram.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct GvspView<'a> {
     pub status: GvcpStatus,
     pub extended_ids: bool,
@@ -109,7 +111,8 @@ pub const PAYLOAD_TYPE_CHUNK_EXTENSION: u16 = 0x4000;
 
 /// The image leader's data area (after the generic flags/payload_type/
 /// timestamp prefix shared by all leaders).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageLeader {
     pub payload_type: u16,
     pub has_chunks: bool,
@@ -159,7 +162,8 @@ impl ImageLeader {
 
 /// A PFNC (Pixel Format Naming Convention) code. Bits 16..24 carry the
 /// number of bits per pixel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct PixelFormat(pub u32);
 
 impl PixelFormat {

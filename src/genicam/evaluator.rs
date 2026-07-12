@@ -5,7 +5,8 @@
 //! integral, any double operand promotes, trig/log/pow always compute in
 //! double.
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     I(i64),
     F(f64),

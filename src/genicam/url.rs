@@ -2,7 +2,8 @@
 //! `Local:Filename.zip;Address;Size` (hex, no 0x prefix), `File:path`, or
 //! `http://...`. Schemes are case-insensitive; real devices emit any casing.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum XmlUrl {
     /// The file lives in device memory at `address`.
     Local {

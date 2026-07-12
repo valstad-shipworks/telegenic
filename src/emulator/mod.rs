@@ -32,7 +32,8 @@ const EXPOSURE_REG: u32 = 0x2014;
 const GAIN_REG: u32 = 0x2018;
 
 /// Static device identity + default geometry the emulator advertises.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeviceConfig {
     pub width: u32,
     pub height: u32,
@@ -62,7 +63,8 @@ impl Default for DeviceConfig {
 }
 
 /// What one inbound GVCP datagram implies for the host.
-#[derive(Debug, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Reaction {
     /// The GVCP acknowledge to send back to the command's source, if any.
     pub reply: Option<Vec<u8>>,

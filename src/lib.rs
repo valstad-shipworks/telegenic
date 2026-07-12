@@ -32,6 +32,10 @@
     )
 )]
 
+#[cfg(feature = "valuable")]
+#[macro_use]
+mod valuable_error;
+
 #[cfg(feature = "emulator")]
 pub mod emulator;
 pub mod error;
@@ -41,6 +45,8 @@ pub mod handle;
 #[cfg(feature = "py")]
 mod py;
 mod thread_util;
+#[cfg(feature = "valuable")]
+mod valuable_impls;
 
 pub use error::{CameraError, GenicamError, Result};
 pub use genicam::{AccessMode, Acquisition, Features, GenICamera, NodeKind, SnapshotSession};

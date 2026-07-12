@@ -26,7 +26,7 @@ use crate::gige::proto::bootstrap::DeviceInfo;
 use crate::gige::proto::gvcp::{self, Ack};
 
 /// One local network adapter to probe.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkAdapter {
     /// OS-level interface name (e.g. `eth0`, `en0`).
     pub name: String,
@@ -65,7 +65,7 @@ pub fn enumerate_adapters() -> io::Result<Vec<NetworkAdapter>> {
     Ok(out)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryConfig {
     /// Adapters to probe; `None` enumerates every Up IPv4 adapter.
     pub adapters: Option<Vec<NetworkAdapter>>,
@@ -94,7 +94,7 @@ impl Default for DiscoveryConfig {
 }
 
 /// A device that answered discovery.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveredDevice {
     pub info: DeviceInfo,
     /// Address the ack came from. Usually `info.ip:3956`, but a device
@@ -209,7 +209,7 @@ fn parse_discovery_ack(
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForceIpConfig {
     pub discovery: DiscoveryConfig,
     /// How long to wait for the (optional) FORCEIP_ACK.

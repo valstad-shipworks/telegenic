@@ -69,7 +69,7 @@ fn set_receive_buffer(socket: &snare::net::UdpSocket, cfg: &StreamConfig, payloa
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GigeConfig {
     /// Device GVCP endpoint, normally `<device ip>:3956`.
     pub addr: SocketAddr,
@@ -112,7 +112,8 @@ impl GigeConfig {
 }
 
 /// Control-channel counters.
-#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "py", pyo3::pyclass(get_all, skip_from_py_object))]
 pub struct LinkStats {
     pub commands: u64,
@@ -127,7 +128,8 @@ pub struct LinkStats {
 }
 
 /// A device-initiated message-channel event.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GvcpEvent {
     /// `EVENT_CMD` or `EVENTDATA_CMD`.
     pub command: u16,
