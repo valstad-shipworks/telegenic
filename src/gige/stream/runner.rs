@@ -646,7 +646,7 @@ pub(crate) struct LinkParams {
 /// Take a prepared (bound, buffer-sized, negotiated) std socket and launch
 /// the stream worker thread.
 pub(crate) fn spawn(
-    std_socket: std::net::UdpSocket,
+    std_socket: snare::net::UdpSocket,
     link: LinkParams,
     rx: Receiver<ToStreamWorker>,
     shared: Arc<StreamShared>,
