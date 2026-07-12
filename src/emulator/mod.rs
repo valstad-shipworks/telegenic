@@ -12,8 +12,8 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use crate::gige::proto::{bootstrap, gvsp};
 use crate::gige::proto::gvcp;
+use crate::gige::proto::{bootstrap, gvsp};
 
 mod xml;
 pub use xml::GENICAM_XML;
@@ -142,7 +142,12 @@ impl GigeDevice {
 
     pub fn read_reg(&self, addr: u32) -> u32 {
         let a = addr as usize;
-        u32::from_be_bytes([self.mem[a], self.mem[a + 1], self.mem[a + 2], self.mem[a + 3]])
+        u32::from_be_bytes([
+            self.mem[a],
+            self.mem[a + 1],
+            self.mem[a + 2],
+            self.mem[a + 3],
+        ])
     }
 
     pub fn write_reg(&mut self, addr: u32, value: u32) {
@@ -219,7 +224,12 @@ impl GigeDevice {
             gvcp::DISCOVERY_CMD => {
                 let block = self.mem[..bootstrap::DISCOVERY_DATA_SIZE].to_vec();
                 Reaction {
-                    reply: Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::DISCOVERY_ACK, gvcp::DISCOVERY_ID, &block)),
+                    reply: Some(ack(
+                        gvcp::GvcpStatus::SUCCESS,
+                        gvcp::DISCOVERY_ACK,
+                        gvcp::DISCOVERY_ID,
+                        &block,
+                    )),
                     ..Default::default()
                 }
             }
@@ -245,11 +255,20 @@ impl GigeDevice {
         for chunk in cmd.payload.chunks_exact(4) {
             let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
             if addr + 4 > self.mem.len() {
-                return nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::READ_REGISTER_ACK, cmd.req_id);
+                return nak(
+                    gvcp::GvcpStatus::INVALID_ADDRESS,
+                    gvcp::READ_REGISTER_ACK,
+                    cmd.req_id,
+                );
             }
             values.extend_from_slice(&self.mem[addr..addr + 4]);
         }
-        ack(gvcp::GvcpStatus::SUCCESS, gvcp::READ_REGISTER_ACK, cmd.req_id, &values)
+        ack(
+            gvcp::GvcpStatus::SUCCESS,
+            gvcp::READ_REGISTER_ACK,
+            cmd.req_id,
+            &values,
+        )
     }
 
     fn write_registers(&mut self, cmd: &gvcp::Cmd<'_>) -> Reaction {
@@ -259,7 +278,11 @@ impl GigeDevice {
             let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             if addr as usize + 4 > self.mem.len() {
                 return Reaction {
-                    reply: Some(nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::WRITE_REGISTER_ACK, cmd.req_id)),
+                    reply: Some(nak(
+                        gvcp::GvcpStatus::INVALID_ADDRESS,
+                        gvcp::WRITE_REGISTER_ACK,
+                        cmd.req_id,
+                    )),
                     ..Default::default()
                 };
             }
@@ -276,40 +299,90 @@ impl GigeDevice {
         }
         let written = (cmd.payload.len() / 8) as u32;
         Reaction {
-            reply: Some(ack(gvcp::GvcpStatus::SUCCESS, gvcp::WRITE_REGISTER_ACK, cmd.req_id, &written.to_be_bytes())),
+            reply: Some(ack(
+                gvcp::GvcpStatus::SUCCESS,
+                gvcp::WRITE_REGISTER_ACK,
+                cmd.req_id,
+                &written.to_be_bytes(),
+            )),
             fire_test,
             acquisition_started,
         }
     }
 
     fn read_memory(&self, cmd: &gvcp::Cmd<'_>) -> Vec<u8> {
-        let Some(addr) = cmd.payload.get(..4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes) else {
-            return nak(gvcp::GvcpStatus::INVALID_HEADER, gvcp::READ_MEMORY_ACK, cmd.req_id);
+        let Some(addr) = cmd
+            .payload
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+        else {
+            return nak(
+                gvcp::GvcpStatus::INVALID_HEADER,
+                gvcp::READ_MEMORY_ACK,
+                cmd.req_id,
+            );
         };
-        let Some(count) = cmd.payload.get(4..8).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes) else {
-            return nak(gvcp::GvcpStatus::INVALID_HEADER, gvcp::READ_MEMORY_ACK, cmd.req_id);
+        let Some(count) = cmd
+            .payload
+            .get(4..8)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+        else {
+            return nak(
+                gvcp::GvcpStatus::INVALID_HEADER,
+                gvcp::READ_MEMORY_ACK,
+                cmd.req_id,
+            );
         };
         let (addr, count) = (addr as usize, count as usize & 0xffff);
         if addr + count > self.mem.len() || count > gvcp::DATA_SIZE_MAX {
-            return nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::READ_MEMORY_ACK, cmd.req_id);
+            return nak(
+                gvcp::GvcpStatus::INVALID_ADDRESS,
+                gvcp::READ_MEMORY_ACK,
+                cmd.req_id,
+            );
         }
         let mut payload = Vec::with_capacity(4 + count);
         payload.extend_from_slice(&(addr as u32).to_be_bytes());
         payload.extend_from_slice(&self.mem[addr..addr + count]);
-        ack(gvcp::GvcpStatus::SUCCESS, gvcp::READ_MEMORY_ACK, cmd.req_id, &payload)
+        ack(
+            gvcp::GvcpStatus::SUCCESS,
+            gvcp::READ_MEMORY_ACK,
+            cmd.req_id,
+            &payload,
+        )
     }
 
     fn write_memory(&mut self, cmd: &gvcp::Cmd<'_>) -> Vec<u8> {
-        let Some(addr) = cmd.payload.get(..4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes) else {
-            return nak(gvcp::GvcpStatus::INVALID_HEADER, gvcp::WRITE_MEMORY_ACK, cmd.req_id);
+        let Some(addr) = cmd
+            .payload
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_be_bytes)
+        else {
+            return nak(
+                gvcp::GvcpStatus::INVALID_HEADER,
+                gvcp::WRITE_MEMORY_ACK,
+                cmd.req_id,
+            );
         };
         let addr = addr as usize;
         let data = cmd.payload.get(4..).unwrap_or_default();
         if addr + data.len() > self.mem.len() {
-            return nak(gvcp::GvcpStatus::INVALID_ADDRESS, gvcp::WRITE_MEMORY_ACK, cmd.req_id);
+            return nak(
+                gvcp::GvcpStatus::INVALID_ADDRESS,
+                gvcp::WRITE_MEMORY_ACK,
+                cmd.req_id,
+            );
         }
         self.mem[addr..addr + data.len()].copy_from_slice(data);
-        ack(gvcp::GvcpStatus::SUCCESS, gvcp::WRITE_MEMORY_ACK, cmd.req_id, &(data.len() as u32).to_be_bytes())
+        ack(
+            gvcp::GvcpStatus::SUCCESS,
+            gvcp::WRITE_MEMORY_ACK,
+            cmd.req_id,
+            &(data.len() as u32).to_be_bytes(),
+        )
     }
 }
 
@@ -502,7 +575,11 @@ mod tests {
 
         let concrete = Ipv4Addr::new(10, 0, 0, 50);
         dev.handle_datagram(
-            &write_reg_cmd(bootstrap::STREAM_CHANNEL_DEST_ADDRESS, u32::from(concrete), 6),
+            &write_reg_cmd(
+                bootstrap::STREAM_CHANNEL_DEST_ADDRESS,
+                u32::from(concrete),
+                6,
+            ),
             client_src(),
         );
         assert_eq!(

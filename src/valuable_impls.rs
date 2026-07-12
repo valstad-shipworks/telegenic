@@ -2,10 +2,10 @@
 //! `Valuable`: `Ipv4Addr`/`SocketAddr` render as their string form, `Duration`
 //! as whole milliseconds under an `_ms`-suffixed field name.
 
+use crate::gige::GigeConfig;
 use crate::gige::discovery::{DiscoveredDevice, DiscoveryConfig, ForceIpConfig, NetworkAdapter};
 use crate::gige::proto::bootstrap::DeviceInfo;
 use crate::gige::stream::StreamConfig;
-use crate::gige::GigeConfig;
 
 macro_rules! valuable_struct {
     (@val $local:ident plain)    => { valuable::Valuable::as_value($local) };

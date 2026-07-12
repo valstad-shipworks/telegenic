@@ -65,7 +65,16 @@ pub enum GenicamError {
 }
 
 #[cfg(feature = "valuable")]
-error_valuable!(GenicamError, "GenicamError", OutOfRange { name, value, min, max });
+error_valuable!(
+    GenicamError,
+    "GenicamError",
+    OutOfRange {
+        name,
+        value,
+        min,
+        max
+    }
+);
 
 pub type GenicamResult<T> = std::result::Result<T, GenicamError>;
 

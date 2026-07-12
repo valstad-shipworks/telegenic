@@ -163,7 +163,9 @@ impl ImageLeader {
 /// A PFNC (Pixel Format Naming Convention) code. Bits 16..24 carry the
 /// number of bits per pixel.
 #[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct PixelFormat(pub u32);
 
 impl PixelFormat {
