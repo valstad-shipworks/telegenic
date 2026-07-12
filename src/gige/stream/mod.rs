@@ -16,7 +16,8 @@ use crate::thread_util::{ThreadConfig, ThreadHandle};
 
 pub use frame::{Frame, FrameStatus, PayloadKind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PacketSize {
     /// Negotiate the largest size the link carries (fire-test bisection).
     #[default]
@@ -25,7 +26,8 @@ pub enum PacketSize {
     Fixed(u16),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResendPolicy {
     /// Request resends for missing packets (when the device supports it).
     #[default]
@@ -33,7 +35,7 @@ pub enum ResendPolicy {
     Never,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StreamConfig {
     /// Stream channel index; almost always 0.
     pub channel: u16,
@@ -97,7 +99,8 @@ impl StreamConfig {
 }
 
 /// Stream receiver counters, all monotonic since stream open.
-#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "py", pyo3::pyclass(get_all, skip_from_py_object))]
 pub struct StreamStats {
     pub packets: u64,

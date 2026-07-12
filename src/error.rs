@@ -26,6 +26,9 @@ pub enum CameraError {
     Spawn(String),
 }
 
+#[cfg(feature = "valuable")]
+error_valuable!(CameraError, "CameraError", Nak { command, status });
+
 pub type Result<T> = std::result::Result<T, CameraError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +63,18 @@ pub enum GenicamError {
     #[error(transparent)]
     Camera(#[from] CameraError),
 }
+
+#[cfg(feature = "valuable")]
+error_valuable!(
+    GenicamError,
+    "GenicamError",
+    OutOfRange {
+        name,
+        value,
+        min,
+        max
+    }
+);
 
 pub type GenicamResult<T> = std::result::Result<T, GenicamError>;
 

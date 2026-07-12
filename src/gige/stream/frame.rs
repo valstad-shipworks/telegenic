@@ -91,7 +91,8 @@ impl Drop for PooledBuf {
 }
 
 /// How a frame ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "py", pyo3::pyclass(eq, eq_int, skip_from_py_object))]
 pub enum FrameStatus {
     /// All packets received.
@@ -110,7 +111,8 @@ pub enum FrameStatus {
 }
 
 /// What the frame carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PayloadKind {
     Image {
         /// Chunk data follows the pixel data (GEV chunk extension).
@@ -160,6 +162,37 @@ impl Frame {
     pub fn data(&self) -> &[u8] {
         let bytes = self.data.bytes();
         &bytes[..self.data_end.min(bytes.len())]
+    }
+}
+
+impl serde::Serialize for Frame {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("Frame", 15)?;
+        s.serialize_field("status", &self.status)?;
+        s.serialize_field("frame_id", &self.frame_id)?;
+        s.serialize_field("payload", &self.payload)?;
+        s.serialize_field("pixel_format", &self.pixel_format)?;
+        s.serialize_field("width", &self.width)?;
+        s.serialize_field("height", &self.height)?;
+        s.serialize_field("x_offset", &self.x_offset)?;
+        s.serialize_field("y_offset", &self.y_offset)?;
+        s.serialize_field("x_padding", &self.x_padding)?;
+        s.serialize_field("y_padding", &self.y_padding)?;
+        s.serialize_field("timestamp_ticks", &self.timestamp_ticks)?;
+        s.serialize_field("timestamp_ns", &self.timestamp_ns)?;
+        s.serialize_field("system_timestamp_ns", &self.system_timestamp_ns)?;
+        s.serialize_field("received_size", &self.received_size)?;
+        let data = if self.status == FrameStatus::Complete {
+            serde_bytes::Bytes::new(self.data())
+        } else {
+            serde_bytes::Bytes::new(&[])
+        };
+        s.serialize_field("data", data)?;
+        s.end()
     }
 }
 

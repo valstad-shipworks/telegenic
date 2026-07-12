@@ -52,7 +52,8 @@ pub fn next_id(id: u16) -> u16 {
 }
 
 /// Status word of an acknowledge (also used by GVSP packets).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GvcpStatus(pub u16);
 
 impl GvcpStatus {
@@ -144,7 +145,8 @@ pub fn is_cmd(buf: &[u8]) -> bool {
 }
 
 /// A decoded acknowledge: header fields plus the payload sized by `length`.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Ack<'a> {
     pub status: GvcpStatus,
     pub answer: u16,
@@ -181,7 +183,8 @@ impl<'a> Ack<'a> {
 }
 
 /// A decoded command packet (device-initiated: events).
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Cmd<'a> {
     pub flags: u8,
     pub command: u16,

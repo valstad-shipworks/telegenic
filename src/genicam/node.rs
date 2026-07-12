@@ -12,7 +12,8 @@ use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::evaluator::{Expr, Value};
 use crate::genicam::port::PortIo;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeId(pub(crate) u32);
 
 /// A reference to another node, resolved from a name after the build pass.
@@ -39,7 +40,8 @@ impl ValueRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "py", pyo3::pyclass(eq, eq_int, skip_from_py_object))]
 pub enum AccessMode {
     RO,
@@ -51,7 +53,8 @@ pub enum AccessMode {
 /// Coarse classification of a node for external introspection (e.g. a
 /// generic settings UI walking the category tree). Register / converter /
 /// plumbing nodes that don't map to a typed feature report [`NodeKind::Other`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeKind {
     Category,
     Integer,

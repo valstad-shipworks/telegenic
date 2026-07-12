@@ -82,7 +82,7 @@ pub const SCPS_FIRE_TEST_PACKET: u32 = 1 << 31;
 /// Identity and addressing of a device, parsed from the first
 /// [`DISCOVERY_DATA_SIZE`] bytes of bootstrap register space (the discovery
 /// acknowledge payload, or the same block read via READMEM).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "py", pyo3::pyclass(skip_from_py_object))]
 pub struct DeviceInfo {
     pub spec_version: (u16, u16),
