@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
+use atomic_waker::AtomicWaker;
 use event_listener::{Event, Listener};
 
 use crate::error::CameraError;
@@ -31,7 +32,10 @@ impl<T> Clone for ResponseHandle<T> {
 
 struct Inner<T> {
     cell: OnceLock<(SystemTime, Response<T>)>,
+    // `event` wakes blocking `wait_timeout` waiters; `waker` wakes the async
+    // `poll` waiter. Both are signalled after `cell` is set.
     event: Event,
+    waker: AtomicWaker,
 }
 
 impl<T: Clone> ResponseHandle<T> {
@@ -40,6 +44,7 @@ impl<T: Clone> ResponseHandle<T> {
             inner: Arc::new(Inner {
                 cell: OnceLock::new(),
                 event: Event::new(),
+                waker: AtomicWaker::new(),
             }),
         }
     }
@@ -48,6 +53,7 @@ impl<T: Clone> ResponseHandle<T> {
     pub(crate) fn fulfill(&self, value: Response<T>) {
         let _ = self.inner.cell.set((SystemTime::now(), value));
         self.inner.event.notify(usize::MAX);
+        self.inner.waker.wake();
     }
 
     pub(crate) fn fail(&self, err: CameraError) {
@@ -93,12 +99,17 @@ impl<T: Clone> Future for ResponseHandle<T> {
     type Output = Response<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let listener = self.inner.event.listen();
         if self.is_set() {
             return Poll::Ready(self.get());
         }
-        let mut pinned = std::pin::pin!(listener);
-        pinned.as_mut().poll(cx).map(|_| self.get())
+        self.inner.waker.register(cx.waker());
+        // Re-check after registering: a fulfill between the check above and the
+        // register would otherwise wake a waker we hadn't stored yet.
+        if self.is_set() {
+            Poll::Ready(self.get())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -115,5 +126,61 @@ pub(crate) fn unwrap_arc(e: Arc<CameraError>) -> CameraError {
     match Arc::try_unwrap(e) {
         Ok(err) => err,
         Err(shared) => CameraError::Spawn(shared.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Wake, Waker};
+    use std::time::Instant;
+
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let mut fut = Box::pin(fut);
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::park();
+        }
+    }
+
+    /// Awaiting a handle must wake when it is fulfilled *after* the first poll
+    /// parks. Parking executor + watchdog so a lost wakeup fails slow instead of
+    /// hanging forever.
+    #[test]
+    fn async_await_wakes_on_late_notify() {
+        let handle = ResponseHandle::<()>::new();
+        let fulfiller = handle.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fulfiller.fail(CameraError::Timeout);
+        });
+
+        let waiter = std::thread::current();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            waiter.unpark();
+        });
+
+        let start = Instant::now();
+        let result = block_on(handle);
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "async poll did not wake on notify (lost-wakeup regression)"
+        );
     }
 }
