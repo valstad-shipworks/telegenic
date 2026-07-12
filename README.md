@@ -2,25 +2,25 @@
 
 Pure-Rust GenICam camera library.
 
-Transports are pluggable backends behind the feature layer. The only backend
-today is GigE Vision (`telegenic::gige`): GVCP (control) and GVSP (stream)
-spoken directly over UDP — no vendor SDK, no GenTL producer. USB3 Vision can
-slot in later without touching the feature API.
+Transports are pluggable, but the only backend right now is GigE Vision
+(`telegenic::gige`), which speaks GVCP (control) and GVSP (streaming)
+directly over UDP.
 
 ```rust no_run
 use telegenic::{GenICamera, StreamConfig};
 
-let mut cam = GenICamera::new([10, 0, 0, 210]); // no I/O, infallible
-cam.connect()?; // dial, take control, load the feature model
+let mut cam = GenICamera::new([10, 0, 0, 210]);
+cam.connect()?; // takes control and loads the feature model
 cam.set_float("ExposureTime", 5000.0)?;
 cam.set_enum("PixelFormat", "Mono8")?;
 
-// One frame on demand — zero stream bandwidth between captures:
+// Grab a single frame. The camera stays idle between captures,
+// so this uses no stream bandwidth outside the snap itself.
 let frame = cam.snap(StreamConfig::new(), std::time::Duration::from_secs(5))?;
 println!("{}x{} {}", frame.width, frame.height, frame.pixel_format);
 
-// Or continuous acquisition. The guard subscribes before the camera
-// starts (so even the first frame is delivered) and stops it on drop:
+// Or stream continuously. The guard subscribes before the camera
+// starts (so the first frame isn't lost) and stops it on drop.
 let acq = cam.start_acquisition(StreamConfig::new())?;
 while let Some(frame) = acq.wait_for(std::time::Duration::from_secs(1)) {
     println!("{}x{} {}", frame.width, frame.height, frame.pixel_format);
@@ -30,44 +30,45 @@ cam.disconnect(std::time::Duration::from_millis(500)); // or just drop it
 # Ok::<(), telegenic::GenicamError>(())
 ```
 
-Cameras are plain owned values with an explicit lifecycle: construction is
-free, `connect(&mut self)` is where I/O happens (and doubles as the
-reconnect path after a dropped link), `disconnect`/drop releases device
-control, and per-connection state — identity, capabilities, the GenICam
-model, stats — lives exactly as long as the connection. Worker-facing
-methods return `Disconnected` while no link is up.
+A camera is a plain owned value. Constructing one does no I/O and can't
+fail; `connect(&mut self)` is where the work happens, and it doubles as the
+reconnect path after a dropped link. Everything tied to a connection
+(identity, capabilities, the parsed GenICam model, stats) lives only as long
+as the connection, and methods return `Disconnected` when no link is up.
 
 ## Layers
 
-- **`GenICamera`**: the GenICam feature layer and the type most users hold.
-  String-keyed typed feature access over the node graph from the device's
-  XML (zipped or plain), Converter/SwissKnife formula evaluation, register
-  caching with pInvalidator handling, and acquisition tied together for you:
-  `start_acquisition` returns an RAII guard for continuous streaming,
-  `snap`/`snapshot_session` capture single frames on demand with the camera
-  idle between shots. Both guards borrow the camera mutably, so stopping is
-  automatic and disconnecting mid-acquisition cannot compile.
-- **`gige`**: the GigE Vision backend.
-  - `gige::discovery`: broadcast device discovery per network adapter, plus
-    Force IP for repointing a camera whose address doesn't match the local
-    subnet (`examples/discover.rs`, `examples/force_ip.rs`).
-  - `gige::GigECamera`: the GVCP transport: register/memory IO as
-    [`ResponseHandle`]s (sync `wait_timeout` or `await`), automatic
-    heartbeat, pending-ack handling, retries, message-channel events, and
-    `open_stream` for raw GVSP channels.
-  - `gige::stream`: per-channel GVSP receiver on its own thread:
-    preallocated buffer pool (zero allocation per packet/frame at steady
-    state), out-of-order reassembly, packet-resend requests, automatic
-    packet size negotiation, frames fanned out as `Arc<Frame>` over bounded
-    channels with drop-on-full.
+`GenICamera` is the top-level type and the one most code uses. It parses the
+device's GenICam XML (zipped or plain) and gives string-keyed typed access
+to the feature node graph, including Converter/SwissKnife formula
+evaluation, register caching, and pInvalidator handling. Acquisition is
+built in: `start_acquisition` returns an RAII guard for continuous
+streaming, and `snap`/`snapshot_session` grab single frames with the camera
+idle in between. Both guards borrow the camera mutably, so stopping happens
+automatically and disconnecting mid-acquisition won't compile.
+
+Underneath sits the GigE Vision backend:
+
+- `gige::discovery` does broadcast device discovery per network adapter, and
+  Force IP for repointing a camera whose address doesn't match the local
+  subnet (see `examples/discover.rs` and `examples/force_ip.rs`).
+- `gige::GigECamera` is the GVCP transport. Register and memory IO return
+  [`ResponseHandle`]s that can be waited on synchronously (`wait_timeout`)
+  or `.await`ed. It handles the heartbeat, pending-acks, retries, and
+  message-channel events, and `open_stream` opens raw GVSP channels.
+- `gige::stream` is the GVSP receiver, one thread per channel. Buffers come
+  from a preallocated pool (no allocation per packet or frame at steady
+  state), packets are reassembled out of order with resend requests, packet
+  size is negotiated automatically, and frames fan out as `Arc<Frame>` over
+  bounded channels that drop when full.
 
 ## Python
 
-The same library ships as a Python package (PyO3/maturin, `py` feature;
-`pip install telegenicam` once published, or `maturin develop` from a
-checkout. The import name stays `telegenic`). The GenICam surface maps one-to-one, every blocking call
-releases the GIL, and frames expose their pixels as `bytes` for
-`numpy.frombuffer`:
+The same library ships as a Python package via PyO3/maturin (the `py`
+feature). Install with `pip install telegenicam` once it's published, or run
+`maturin develop` from a checkout; the import name is `telegenic` either
+way. The GenICam surface maps one-to-one, blocking calls release the GIL,
+and frames expose their pixels as `bytes` for `numpy.frombuffer`:
 
 ```python
 import telegenic
@@ -87,8 +88,8 @@ with cam.start_acquisition() as acq:   # stops the camera again on exit
             print(frame)
 ```
 
-`telegenic.discover()` finds cameras on the local subnets. Type stubs and
-docstrings ship in the package (`telegenic/__init__.pyi`).
+`telegenic.discover()` finds cameras on the local subnets. The package
+includes type stubs and docstrings (`telegenic/__init__.pyi`).
 
 ## Examples
 
@@ -104,8 +105,9 @@ python examples/grab.py <camera-ip> [n]       # the same, via the bindings
 ## Testing
 
 `cargo test` runs everything against an in-process fake camera over loopback
-UDP (`tests/fake_camera/`): GVCP semantics (retries, pending-ack, control
-loss), discovery/force-IP, GVSP reassembly under loss/reordering/duplication
-with resend replay, GenICam evaluation against the real Hikrobot and Imperx
-vendor XMLs in `tests/data/`, and the full GenICamera path including
-message-channel events and single-frame snapshots.
+UDP (`tests/fake_camera/`). It covers GVCP semantics (retries, pending-ack,
+control loss), discovery and Force IP, GVSP reassembly under packet loss,
+reordering, and duplication with resend replay, GenICam evaluation against
+the real Hikrobot and Imperx vendor XMLs in `tests/data/`, and the full
+`GenICamera` path including message-channel events and single-frame
+snapshots.
