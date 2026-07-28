@@ -44,9 +44,11 @@ pub mod gige;
 pub mod handle;
 #[cfg(feature = "py")]
 mod py;
+mod rx_timestamp;
 mod thread_util;
 #[cfg(feature = "valuable")]
 mod valuable_impls;
+pub mod wire;
 
 pub use error::{CameraError, GenicamError, Result};
 pub use genicam::{AccessMode, Acquisition, Features, GenICamera, NodeKind, SnapshotSession};
@@ -57,3 +59,7 @@ pub use gige::stream::{
 };
 pub use handle::ResponseHandle;
 pub use thread_util::ThreadConfig;
+pub use wire::{
+    ControlRx, ControlTelemetry, ControlTx, GvcpAck, GvcpCmd, GvspPacket, StreamTelemetry,
+    TelemetrySink,
+};

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use flume::{Receiver, TryRecvError};
 use snare::mio::net::UdpSocket;
@@ -18,7 +18,9 @@ use crate::gige::proto::bootstrap;
 use crate::gige::proto::gvcp::{self, Ack};
 use crate::gige::{GigeConfig, GvcpEvent, Shared};
 use crate::handle::ResponseHandle;
+use crate::rx_timestamp;
 use crate::thread_util::ThreadHandle;
+use crate::wire::{self, ControlTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
 pub(crate) const TOK_WAKER: Token = Token(1);
@@ -113,6 +115,10 @@ pub(crate) struct Runner {
     heartbeat_period: Duration,
     heartbeat_due: Instant,
     control_lost: bool,
+    telemetry: Option<ControlTelemetry>,
+    /// Whether the control socket carries kernel rx timestamps. When false the
+    /// worker stamps at user-space receive instead.
+    kernel_ts: bool,
 }
 
 /// What to encode when an op reaches the head of the queue.
@@ -130,6 +136,8 @@ impl Runner {
         shared: Arc<Shared>,
         thread: ThreadHandle,
         cfg: GigeConfig,
+        telemetry: Option<ControlTelemetry>,
+        kernel_ts: bool,
     ) -> Self {
         let heartbeat_period = heartbeat_period(&cfg);
         Self {
@@ -147,11 +155,28 @@ impl Runner {
             heartbeat_period,
             heartbeat_due: Instant::now() + heartbeat_period,
             control_lost: false,
+            telemetry,
+            kernel_ts,
         }
+    }
+
+    /// Put a datagram on the control socket, reporting it to the sink once the
+    /// kernel has taken it. Every outbound byte goes through here.
+    fn send_to(&self, datagram: &[u8], dst: SocketAddr, retry: bool) -> std::io::Result<usize> {
+        let sent = self.socket.send_to(datagram, dst)?;
+        if let Some(sink) = &self.telemetry
+            && let Some(tx) = wire::control_tx(datagram, retry)
+        {
+            sink.sent(&tx, SystemTime::now());
+        }
+        Ok(sent)
     }
 
     pub(crate) fn run(mut self, mut poll: Poll) {
         self.cfg.thread_cfg.apply_logged();
+        if let Some(sink) = &self.telemetry {
+            sink.warmup();
+        }
         let mut events = Events::with_capacity(16);
         let mut buf = [0u8; RECV_BUF];
         while self.thread.should_live() && !self.control_lost {
@@ -179,12 +204,23 @@ impl Runner {
 
     fn drain_socket(&mut self, buf: &mut [u8]) {
         loop {
-            match self.socket.recv_from(buf) {
-                Ok((n, src)) => {
+            let read = if self.kernel_ts {
+                rx_timestamp::recv_from_timestamped(&self.socket, buf)
+            } else {
+                self.socket.recv_from(buf).map(|(n, src)| (n, src, None))
+            };
+            match read {
+                Ok((n, src, ts)) => {
                     // Events may come from a device source port other than
                     // 3956, so filter on IP only.
                     if src.ip() != self.device_addr.ip() {
                         continue;
+                    }
+                    let at = ts.unwrap_or_else(SystemTime::now);
+                    if let Some(sink) = &self.telemetry
+                        && let Some(rx) = wire::control_rx(&buf[..n])
+                    {
+                        sink.received(&rx, at);
                     }
                     self.on_datagram(&buf[..n], src);
                 }
@@ -340,7 +376,7 @@ impl Runner {
             // Acknowledge to the message channel's source socket, not the
             // device's GVCP port.
             let ack = gvcp::encode_event_ack(cmd.command, cmd.req_id);
-            if let Err(e) = self.socket.send_to(&ack, src) {
+            if let Err(e) = self.send_to(&ack, src, false) {
                 tracing::warn!("event ack send failed: {e}");
             }
         }
@@ -464,7 +500,7 @@ impl Runner {
                 return;
             }
         };
-        if let Err(e) = self.socket.send_to(&datagram, self.device_addr) {
+        if let Err(e) = self.send_to(&datagram, self.device_addr, false) {
             op.fail(CameraError::Io(e));
             return;
         }
@@ -494,7 +530,9 @@ impl Runner {
                 tries_left = inflight.tries_left,
                 "ack overdue, retrying transaction"
             );
-            if let Err(e) = self.socket.send_to(&inflight.sent, self.device_addr) {
+            if let Some(inflight) = &self.inflight
+                && let Err(e) = self.send_to(&inflight.sent, self.device_addr, true)
+            {
                 tracing::warn!("retry send failed: {e}");
             }
             return;
@@ -557,7 +595,7 @@ impl Runner {
             self.next_id = gvcp::next_id(self.next_id);
             let release =
                 gvcp::encode_write_reg(&[(bootstrap::CONTROL_CHANNEL_PRIVILEGE, 0)], self.next_id);
-            let _ = self.socket.send_to(&release, self.device_addr);
+            let _ = self.send_to(&release, self.device_addr, false);
         }
         self.event_txs.clear();
         self.thread.has_died();
@@ -601,6 +639,7 @@ pub(crate) fn spawn(
     rx: Receiver<ToWorker>,
     shared: Arc<Shared>,
     cfg: GigeConfig,
+    telemetry: Option<ControlTelemetry>,
 ) -> Result<(ThreadHandle, SocketAddr), CameraError> {
     let bind_addr = cfg
         .local_addr
@@ -610,6 +649,8 @@ pub(crate) fn spawn(
     let local_addr = socket
         .local_addr()
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
+
+    let kernel_ts = rx_timestamp::enable_logged(&socket, "gvcp");
 
     let poll = Poll::new().map_err(|e| CameraError::Spawn(e.to_string()))?;
     poll.registry()
@@ -626,7 +667,15 @@ pub(crate) fn spawn(
     let join = snare::thread::Builder::new()
         .name("telegenic-gvcp".into())
         .spawn(move || {
-            let runner = Runner::new(socket, rx, shared, thread_for_worker, cfg);
+            let runner = Runner::new(
+                socket,
+                rx,
+                shared,
+                thread_for_worker,
+                cfg,
+                telemetry,
+                kernel_ts,
+            );
             runner.run(poll);
         })
         .map_err(|e| CameraError::Spawn(e.to_string()))?;

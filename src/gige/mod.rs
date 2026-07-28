@@ -29,6 +29,9 @@ use crate::gige::runner::ToWorker;
 use crate::gige::stream::{StreamChannel, StreamConfig, StreamShared};
 use crate::handle::{ResponseHandle, unwrap_arc};
 use crate::thread_util::{ThreadConfig, ThreadHandle};
+use crate::wire::{
+    ControlRx, ControlTelemetry, ControlTx, GvcpCmd, GvspPacket, StreamTelemetry, TelemetrySink,
+};
 
 pub use proto::bootstrap::DeviceInfo;
 pub use proto::gvcp::GvcpStatus;
@@ -354,6 +357,7 @@ struct Connection {
 pub struct GigECamera {
     cfg: GigeConfig,
     connection: Option<Connection>,
+    telemetry: Option<ControlTelemetry>,
 }
 
 impl std::fmt::Debug for GigECamera {
@@ -384,7 +388,17 @@ impl GigECamera {
         Self {
             cfg,
             connection: None,
+            telemetry: None,
         }
+    }
+
+    /// Install a telemetry sink observing every GVCP datagram on the control
+    /// channel. Takes effect on the next [`connect`](Self::connect); the live
+    /// connection keeps the sink it was established with. Stream channels
+    /// carry their own sink — see
+    /// [`open_stream_with_telemetry`](Self::open_stream_with_telemetry).
+    pub fn set_telemetry<S: TelemetrySink<ControlTx, ControlRx>>(&mut self, telemetry: S) {
+        self.telemetry = Some(Arc::new(telemetry));
     }
 
     pub fn config(&self) -> &GigeConfig {
@@ -408,7 +422,7 @@ impl GigECamera {
             // Dropping joins the dead worker and frees per-connection state.
             self.connection = None;
         }
-        let conn = establish(self.cfg.clone())?;
+        let conn = establish(self.cfg.clone(), self.telemetry.clone())?;
         tracing::debug!(
             addr = %conn.device_addr,
             model = %conn.info.model,
@@ -565,6 +579,30 @@ impl GigECamera {
     /// `AcquisitionStart` feature, or
     /// [`GenICamera::start_acquisition`](crate::GenICamera)).
     pub fn open_stream(&self, cfg: StreamConfig) -> Result<StreamChannel> {
+        self.open_stream_inner(cfg, None)
+    }
+
+    /// Like [`open_stream`](Self::open_stream), with a telemetry sink
+    /// observing every GVSP datagram the channel receives and every resend
+    /// request it sends.
+    ///
+    /// The sink is called once per datagram on the receive thread — tens of
+    /// thousands of times a second on a fast link — and each call materializes
+    /// an owned copy of the packet body. Keep the implementation to a queue
+    /// push, and do the real work elsewhere.
+    pub fn open_stream_with_telemetry<S: TelemetrySink<GvcpCmd, GvspPacket>>(
+        &self,
+        cfg: StreamConfig,
+        telemetry: S,
+    ) -> Result<StreamChannel> {
+        self.open_stream_inner(cfg, Some(Arc::new(telemetry)))
+    }
+
+    fn open_stream_inner(
+        &self,
+        cfg: StreamConfig,
+        telemetry: Option<StreamTelemetry>,
+    ) -> Result<StreamChannel> {
         let payload_size = cfg
             .payload_size
             .filter(|&n| n > 0)
@@ -651,6 +689,7 @@ impl GigECamera {
             rx,
             shared.clone(),
             cfg,
+            telemetry,
         )?;
 
         tracing::debug!(channel, local = %bound, packet_size, "stream channel opened");
@@ -742,10 +781,10 @@ fn advertised_host_ip(conn: &Connection) -> Result<IpAddr> {
 /// Dial and bootstrap one connection. On any failure the worker is torn
 /// down (joined, control released) by `ThreadHandle`'s drop before the
 /// error propagates — nothing leaks out of a half-built connection.
-fn establish(cfg: GigeConfig) -> Result<Connection> {
+fn establish(cfg: GigeConfig, telemetry: Option<ControlTelemetry>) -> Result<Connection> {
     let shared = Arc::new(Shared::new());
     let (to_worker, rx) = flume::unbounded();
-    let (thread, local_addr) = runner::spawn(rx, shared.clone(), cfg.clone())?;
+    let (thread, local_addr) = runner::spawn(rx, shared.clone(), cfg.clone(), telemetry)?;
     let port = ControlPort {
         to_worker,
         thread: thread.to_pass_in(),

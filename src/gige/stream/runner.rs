@@ -4,7 +4,7 @@
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use flume::{Receiver, TryRecvError};
 use snare::mio::net::UdpSocket;
@@ -15,7 +15,9 @@ use crate::gige::proto::gvcp::{self, GvcpStatus};
 use crate::gige::proto::gvsp::{self, ContentType, GvspView, ImageLeader};
 use crate::gige::stream::frame::{BufSlot, Frame, FramePool, FrameStatus, PayloadKind, PooledBuf};
 use crate::gige::stream::{StreamConfig, StreamShared, StreamStats};
+use crate::rx_timestamp;
 use crate::thread_util::ThreadHandle;
+use crate::wire::{self, StreamTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
 pub(crate) const TOK_WAKER: Token = Token(1);
@@ -78,11 +80,18 @@ pub(crate) struct StreamRunner {
     last_frame_id: u64,
     first_packet: bool,
     tick_frequency: u64,
+    telemetry: Option<StreamTelemetry>,
+    /// Whether the stream socket carries kernel rx timestamps. When false the
+    /// worker stamps at user-space receive instead.
+    kernel_ts: bool,
 }
 
 impl StreamRunner {
     pub(crate) fn run(mut self, mut poll: Poll) {
         self.cfg.thread_cfg.apply_logged();
+        if let Some(sink) = &self.telemetry {
+            sink.warmup();
+        }
         let mut events = Events::with_capacity(16);
         let mut buf = [0u8; 0xffff];
         loop {
@@ -139,13 +148,23 @@ impl StreamRunner {
 
     fn drain_socket(&mut self, buf: &mut [u8]) {
         loop {
-            match self.socket.recv_from(buf) {
-                Ok((n, src)) => {
+            let read = if self.kernel_ts {
+                rx_timestamp::recv_from_timestamped(&self.socket, buf)
+            } else {
+                self.socket.recv_from(buf).map(|(n, src)| (n, src, None))
+            };
+            match read {
+                Ok((n, src, ts)) => {
                     if src.ip() != self.device_gvcp_addr.ip() {
                         continue;
                     }
                     self.stats.packets += 1;
                     self.stats.bytes += n as u64;
+                    if let Some(sink) = &self.telemetry
+                        && let Some(rx) = wire::stream_rx(&buf[..n])
+                    {
+                        sink.received(&rx, ts.unwrap_or_else(SystemTime::now));
+                    }
                     self.process_packet(&buf[..n], Instant::now());
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
@@ -499,6 +518,12 @@ impl StreamRunner {
             .send_to(&self.resend_buf[..len], self.device_gvcp_addr)
         {
             tracing::trace!("resend request send failed: {e}");
+            return;
+        }
+        if let Some(sink) = &self.telemetry
+            && let Some(tx) = wire::stream_tx(&self.resend_buf[..len])
+        {
+            sink.sent(&tx, SystemTime::now());
         }
     }
 
@@ -651,10 +676,12 @@ pub(crate) fn spawn(
     rx: Receiver<ToStreamWorker>,
     shared: Arc<StreamShared>,
     cfg: StreamConfig,
+    telemetry: Option<StreamTelemetry>,
 ) -> Result<ThreadHandle, CameraError> {
     std_socket
         .set_nonblocking(true)
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
+    let kernel_ts = rx_timestamp::enable_logged(&std_socket, "gvsp");
     let mut socket = UdpSocket::from_std(std_socket);
 
     let poll = Poll::new().map_err(|e| CameraError::Spawn(e.to_string()))?;
@@ -692,6 +719,8 @@ pub(crate) fn spawn(
                 last_frame_id: 0,
                 first_packet: true,
                 tick_frequency: link.tick_frequency,
+                telemetry,
+                kernel_ts,
                 cfg,
             };
             runner.run(poll);
