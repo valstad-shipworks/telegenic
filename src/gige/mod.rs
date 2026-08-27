@@ -897,7 +897,7 @@ fn fetch_device_info_sequential(port: &ControlPort) -> Result<DeviceInfo> {
         ip,
         mask,
         gateway,
-    ] = vec![
+    ] = [
         bootstrap::VERSION,
         bootstrap::DEVICE_MODE,
         bootstrap::DEVICE_MAC_HIGH,
