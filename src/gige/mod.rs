@@ -780,7 +780,13 @@ fn establish(cfg: GigeConfig) -> Result<Connection> {
         .wait_timeout(budget)
         .map_err(unwrap_arc)?;
 
-    let info = fetch_device_info(&port)?;
+    let concat_supported = (0x20000000 & capabilities) != 0;
+
+    let info = if concat_supported {
+        fetch_device_info(&port)?
+    } else {
+        fetch_device_info_sequential(&port)?
+    };
 
     Ok(Connection {
         port,
@@ -825,6 +831,90 @@ fn fetch_device_info(port: &ControlPort) -> Result<DeviceInfo> {
         mask,
         gateway,
     ] = regs[..]
+    else {
+        return Err(CameraError::Protocol(
+            "short bootstrap register read".into(),
+        ));
+    };
+
+    let string_field = |addr: u32, size: usize| -> Result<String> {
+        match port.read_memory(addr, size as u32).wait_timeout(budget) {
+            Ok(raw) => {
+                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                Ok(String::from_utf8_lossy(&raw[..end]).into_owned())
+            }
+            // Optional fields on some devices; identity is still usable.
+            Err(e) if matches!(&*e, CameraError::Nak { .. }) => {
+                tracing::trace!("string register {addr:#06x} unreadable: {e}");
+                Ok(String::new())
+            }
+            Err(e) => Err(unwrap_arc(e)),
+        }
+    };
+
+    let mut mac = [0u8; 6];
+    mac[..2].copy_from_slice(&mac_high.to_be_bytes()[2..]);
+    mac[2..].copy_from_slice(&mac_low.to_be_bytes());
+
+    Ok(DeviceInfo {
+        spec_version: ((version >> 16) as u16, version as u16),
+        device_mode,
+        mac,
+        supported_ip_config,
+        current_ip_config,
+        ip: ip.into(),
+        subnet_mask: mask.into(),
+        gateway: gateway.into(),
+        manufacturer: string_field(
+            bootstrap::MANUFACTURER_NAME,
+            bootstrap::MANUFACTURER_NAME_SIZE,
+        )?,
+        model: string_field(bootstrap::MODEL_NAME, bootstrap::MODEL_NAME_SIZE)?,
+        device_version: string_field(bootstrap::DEVICE_VERSION, bootstrap::DEVICE_VERSION_SIZE)?,
+        manufacturer_info: string_field(
+            bootstrap::MANUFACTURER_INFO,
+            bootstrap::MANUFACTURER_INFO_SIZE,
+        )?,
+        serial: string_field(bootstrap::SERIAL_NUMBER, bootstrap::SERIAL_NUMBER_SIZE)?,
+        user_defined_name: string_field(
+            bootstrap::USER_DEFINED_NAME,
+            bootstrap::USER_DEFINED_NAME_SIZE,
+        )?,
+    })
+}
+
+/// Same as fetch_device_info, but registers are read one at a time.
+/// For use with cameras that do not support concat.
+fn fetch_device_info_sequential(port: &ControlPort) -> Result<DeviceInfo> {
+    let budget = port.budget();
+    let [
+        version,
+        device_mode,
+        mac_high,
+        mac_low,
+        supported_ip_config,
+        current_ip_config,
+        ip,
+        mask,
+        gateway,
+    ] = vec![
+        bootstrap::VERSION,
+        bootstrap::DEVICE_MODE,
+        bootstrap::DEVICE_MAC_HIGH,
+        bootstrap::DEVICE_MAC_LOW,
+        bootstrap::SUPPORTED_IP_CONFIG,
+        bootstrap::CURRENT_IP_CONFIG,
+        bootstrap::CURRENT_IP_ADDRESS,
+        bootstrap::CURRENT_SUBNET_MASK,
+        bootstrap::CURRENT_GATEWAY,
+    ]
+    .iter()
+    .map(|reg| {
+        port.read_register(*reg)
+            .wait_timeout(budget)
+            .map_err(unwrap_arc)
+    })
+    .collect::<Result<Vec<u32>>>()?[..]
     else {
         return Err(CameraError::Protocol(
             "short bootstrap register read".into(),
