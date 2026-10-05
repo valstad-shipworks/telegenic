@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use snare::{Sim, SimBuilder, UdpPolicy};
+use snare::{IpNet, NicSpec, Sim, SimBuilder, UdpPolicy};
 use telegenic::emulator::{self, DeviceConfig, GigeDevice, ResendRequest};
 use telegenic::gige::GigeConfig;
 use telegenic::gige::proto::gvcp::{self, GVCP_PORT};
@@ -37,7 +37,20 @@ pub fn sim(seed: u64) -> Sim {
     sim_with(seed, |b| b)
 }
 
+/// The host's adapter on the camera's segment: the host at `HOST_IP`, the
+/// camera a separate station on the same /24, as on a real link.
+pub fn eth0() -> NicSpec {
+    NicSpec::new("eth0")
+        .address(IpNet::new(HOST_IP.into(), 24))
+        .station(DEVICE_IP)
+}
+
 pub fn sim_with(seed: u64, extra: impl FnOnce(SimBuilder) -> SimBuilder) -> Sim {
+    bare_sim_with(seed, |b| extra(b.nic(eth0())))
+}
+
+/// A sim with no adapter, for tests that lay out their own.
+pub fn bare_sim_with(seed: u64, extra: impl FnOnce(SimBuilder) -> SimBuilder) -> Sim {
     extra(
         Sim::builder()
             .deterministic()

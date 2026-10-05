@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use common::{
     ACQ_REG, Camera, CameraSpec, DEVICE_IP, HOST_IP, Pending, assert_costs, assert_within, config,
-    sim, sim_with,
+    sim,
 };
 use snare::{IpNet, NicSpec, SocketEntry, SocketKind};
 use telegenic::emulator;
@@ -42,16 +42,6 @@ const TIMEOUT: Duration = Duration::from_millis(500);
 const CONTROL_PORT: u16 = 40_000;
 /// The worker's poll period: deadlines are noticed at its next wake.
 const POLL: Duration = Duration::from_millis(10);
-
-fn eth0() -> NicSpec {
-    NicSpec::new("eth0")
-        .address(IpNet::new(HOST_IP.into(), 24))
-        .station(DEVICE_IP)
-}
-
-fn with_eth0(seed: u64) -> snare::Sim {
-    sim_with(seed, |b| b.nic(eth0()))
-}
 
 fn control_addr() -> SocketAddr {
     SocketAddr::new(HOST_IP.into(), CONTROL_PORT)
@@ -230,7 +220,7 @@ fn options_for_another_platform_are_skipped() {
 /// at and bound to the host's address on the camera's subnet.
 #[test]
 fn an_unbound_control_socket_streams_to_the_host_address() {
-    with_eth0(4).run(|| {
+    sim(4).run(|| {
         let _device = Camera::spawn();
         let cam = connected(config(2));
         let stream = cam.open_stream(stream_config()).expect("open stream");
@@ -242,7 +232,7 @@ fn an_unbound_control_socket_streams_to_the_host_address() {
 /// buffers and the bound interface read back from the kernel's view.
 #[test]
 fn accepted_socket_options_land_on_the_sockets() {
-    with_eth0(3).run(|| {
+    sim(3).run(|| {
         let device = Camera::spawn();
         let cam = connected(GigeConfig {
             control_socket: vec![
@@ -287,7 +277,7 @@ fn accepted_socket_options_land_on_the_sockets() {
 /// OS error before any traffic, and closes the socket before binding it.
 #[test]
 fn an_unknown_bind_device_fails_connect_cleanly() {
-    with_eth0(4).run(|| {
+    sim(4).run(|| {
         let device = Camera::spawn();
         let mut cam = GigECamera::with_config(GigeConfig {
             control_socket: vec![SocketOption::BindDevice("nope0".into())],
@@ -323,7 +313,7 @@ fn refusing_stream_thread() -> Vec<ThreadOption> {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn a_stream_thread_option_the_os_refuses_fails_open() {
-    let sim = sim_with(5, |b| b.privileges(snare::Privileges::none()));
+    let sim = common::sim_with(5, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let cam = connected(config(2));
@@ -350,7 +340,7 @@ fn a_stream_thread_option_the_os_refuses_fails_open() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn a_failed_stream_open_closes_the_channel_on_the_device() {
-    let sim = sim_with(6, |b| b.privileges(snare::Privileges::none()));
+    let sim = common::sim_with(6, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let cam = connected(config(2));
@@ -428,7 +418,7 @@ fn blocking_calls_return_the_transaction_error_unchanged() {
 /// traffic and leaves no socket behind.
 #[test]
 fn a_control_thread_option_the_os_refuses_fails_connect() {
-    let sim = sim_with(7, |b| b.privileges(snare::Privileges::none()));
+    let sim = common::sim_with(7, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let mut cam = GigECamera::with_config(GigeConfig {
@@ -747,7 +737,7 @@ fn a_silent_camera_is_declared_lost_and_reconnects_when_back() {
 /// down and succeeds once it is back.
 #[test]
 fn link_down_loses_control_and_link_up_lets_it_reconnect() {
-    with_eth0(22).run(|| {
+    sim(22).run(|| {
         let device = Camera::spawn();
         let mut cam = connected(config(2));
         std::thread::sleep(Duration::from_millis(2500));
@@ -792,7 +782,8 @@ fn ack_bytes(status: GvcpStatus, answer: u16, id: u16, payload: &[u8]) -> Vec<u8
 /// host — is ignored; the transaction completes on the real ack at once.
 #[test]
 fn malformed_and_stale_acks_are_ignored() {
-    sim(30).run(|| {
+    let stranger_ip = Ipv4Addr::new(10, 0, 0, 66);
+    common::bare_sim_with(30, |b| b.nic(common::eth0().station(stranger_ip))).run(|| {
         let device = Camera::spawn();
         let cam = connected(config(2));
         cam.write_register(PROBE_REG, 0x1234)
@@ -800,7 +791,7 @@ fn malformed_and_stale_acks_are_ignored() {
             .wait()
             .unwrap();
         let unsolicited = cam.stats().unwrap().unsolicited;
-        let stranger = UdpSocket::bind((Ipv4Addr::new(10, 0, 0, 66), 0)).unwrap();
+        let stranger = UdpSocket::bind((stranger_ip, 0)).unwrap();
         device.faults(|f| {
             f.ack_filter = Some(Box::new(move |cmd, src, ack| {
                 if common::first_addr(cmd) != Some(PROBE_REG) {
@@ -1052,8 +1043,8 @@ const STRAY_CAMERA: Ipv4Addr = Ipv4Addr::new(169, 254, 3, 3);
 /// which is then flagged as unreachable.
 #[test]
 fn discovery_across_adapters_finds_each_camera_once() {
-    let sim = sim_with(33, |b| {
-        b.nic(eth0().station(STRAY_CAMERA)).nic(
+    let sim = common::bare_sim_with(33, |b| {
+        b.nic(common::eth0().station(STRAY_CAMERA)).nic(
             NicSpec::new("eth1")
                 .address(IpNet::new(SECOND_HOST.into(), 24))
                 .station(SECOND_CAMERA),

@@ -64,4 +64,4 @@ libc = "0.2.186"
 pyo3 = { version = "0.29", optional = true, features = ["generate-import-lib"] }
 
 [target.'cfg(any(all(target_os = "linux", target_env = "gnu", any(target_arch = "x86_64", target_arch = "aarch64")), target_os = "macos", windows))'.dev-dependencies]
-snare = "2"
+snare = "2.0.2"
