@@ -4,7 +4,18 @@
 //! A synthetic adapter with `broadcast = 127.0.0.1` routes the beacon over
 //! loopback — the discovery socket sends to whatever `broadcast` it is given.
 
-#![cfg(unix)]
+#![cfg(all(
+    unix,
+    any(
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    )
+))]
 
 mod fake_camera;
 

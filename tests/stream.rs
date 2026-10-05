@@ -5,7 +5,18 @@
 //! `block + 36` (standard ids) / `block + 48` (extended) so the receiver's
 //! block-size math matches the generator's.
 
-#![cfg(unix)]
+#![cfg(all(
+    unix,
+    any(
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    )
+))]
 
 mod fake_camera;
 

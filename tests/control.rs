@@ -1,7 +1,18 @@
 //! Integration tests for the GVCP control driver against the fake camera,
 //! each inside a deterministic snare simulation.
 
-#![cfg(unix)]
+#![cfg(all(
+    unix,
+    any(
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    )
+))]
 
 mod fake_camera;
 
