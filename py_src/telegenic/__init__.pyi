@@ -28,7 +28,13 @@ import enum
 from collections.abc import Iterator
 from typing import final
 
-from ._options import SocketOptionsLike, ThreadOptionsLike
+from ._options import (
+    ProcessGuard,
+    SocketOptionsLike,
+    ThreadOptionsLike,
+    TuningReportDict,
+    apply_process_options,
+)
 
 __version__: str
 
@@ -43,8 +49,10 @@ __all__ = [
     "FrameStatus",
     "GenicamError",
     "LinkStats",
+    "ProcessGuard",
     "SnapshotSession",
     "StreamStats",
+    "apply_process_options",
     "discover",
 ]
 
@@ -166,6 +174,12 @@ class Camera:
 
     def link_stats(self) -> LinkStats | None:
         """Control-channel counters, or ``None`` while disconnected."""
+
+    def tuning_report(self) -> TuningReportDict | None:
+        """What ``thread`` and ``control_socket`` came to on the current
+        connection: the options applied, those the platform adjusted (a
+        ``recv_buffer`` capped by the kernel, say) and those skipped; or
+        ``None`` while disconnected."""
 
     def feature_names(self) -> list[str]:
         """Every node name in the device description (features plus the
@@ -309,6 +323,10 @@ class SnapshotSession:
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
 
+    def tuning_report(self) -> TuningReportDict:
+        """What the stream's ``thread`` and ``stream_socket`` options came
+        to."""
+
     def is_closed(self) -> bool: ...
     def close(self) -> None:
         """Restore ``AcquisitionMode``, unlock transport parameters, and
@@ -351,6 +369,10 @@ class Acquisition:
     def stats(self) -> StreamStats: ...
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
+
+    def tuning_report(self) -> TuningReportDict:
+        """What the stream's ``thread`` and ``stream_socket`` options came
+        to."""
 
     def local_addr(self) -> str:
         """Where the device sends this stream, as ``ip:port``."""

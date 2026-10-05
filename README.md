@@ -122,6 +122,18 @@ acq = cam.start_acquisition(
     thread=[("cpu_affinity", [3]), ("rt_priority", 80)],
     stream_socket={"recv_buffer": 32 << 20},
 )
+print(acq.tuning_report()["socket"]["adjusted"])
+```
+
+`telegenic.apply_process_options` applies the process-wide ones and returns
+a guard that holds them:
+
+```python
+with telegenic.apply_process_options(
+    ["lock_memory", ("linux_cpu_dma_latency", 0)]
+) as guard:
+    print(guard.applied, guard.skipped)
+    ...
 ```
 
 ## Python

@@ -371,8 +371,23 @@ def test_a_disconnected_camera_answers_what_needs_no_device():
     assert not cam.is_connected()
     assert not cam.has_feature("Width")
     assert cam.link_stats() is None
+    assert cam.tuning_report() is None
     assert repr(cam) == "Camera(127.0.0.1, connected=False)"
     cam.disconnect()
+
+
+def test_process_options_are_held_by_a_guard():
+    if sys.platform == "win32":
+        foreign, kind = ("linux_cpu_dma_latency", 0), "linux_cpu_dma_latency"
+    else:
+        foreign = kind = "win_disable_power_throttling"
+    with telegenic.apply_process_options([foreign]) as guard:
+        assert guard.active
+        assert guard.applied == []
+        assert [s["option"]["kind"] for s in guard.skipped] == [kind]
+    assert not guard.active
+    with pytest.raises(ValueError, match="no_such_option"):
+        telegenic.apply_process_options("no_such_option")
 
 
 def test_errors_are_distinct_runtime_errors():

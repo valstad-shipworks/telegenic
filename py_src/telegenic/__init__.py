@@ -18,8 +18,10 @@ __all__ = [
     "FrameStatus",
     "GenicamError",
     "LinkStats",
+    "ProcessGuard",
     "SnapshotSession",
     "StreamStats",
+    "apply_process_options",
     "discover",
 ]
 

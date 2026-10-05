@@ -14,11 +14,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_talker::options::Report;
 use fast_talker::py::{SocketOptions, ThreadOptions};
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::{AccessMode, GenICamera};
@@ -27,6 +28,7 @@ use crate::gige::stream::{
     FrameChannel, FrameStatus, PacketSize, ResendPolicy, StreamChannel, StreamConfig, StreamStats,
 };
 use crate::gige::{DeviceInfo, GigeConfig, LinkStats};
+use crate::tuning::TuningReport;
 
 mod exceptions {
     pyo3::create_exception!(
@@ -205,6 +207,12 @@ impl Camera {
     #[pyo3(name = "link_stats")]
     fn py_link_stats(&self) -> Option<LinkStats> {
         self.inner.lock().transport().stats()
+    }
+
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let report = self.inner.lock().transport().tuning_report().cloned();
+        report.map(|r| tuning_dict(py, r)).transpose()
     }
 
     #[pyo3(name = "feature_names")]
@@ -584,6 +592,17 @@ impl PySnapshotSession {
             .ok_or_else(|| PyValueError::new_err("snapshot session is closed"))
     }
 
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = self
+            .state
+            .lock()
+            .as_ref()
+            .map(|s| s.stream.tuning_report().clone())
+            .ok_or_else(|| PyValueError::new_err("snapshot session is closed"))?;
+        tuning_dict(py, report)
+    }
+
     #[pyo3(name = "is_closed")]
     fn py_is_closed(&self) -> bool {
         self.state.lock().is_none()
@@ -746,6 +765,12 @@ impl PyAcquisition {
     #[pyo3(name = "packet_size")]
     fn py_packet_size(&self) -> PyResult<u16> {
         self.with_stream(StreamChannel::packet_size)
+    }
+
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = self.with_stream(|s| s.tuning_report().clone())?;
+        tuning_dict(py, report)
     }
 
     #[pyo3(name = "local_addr")]
@@ -1055,6 +1080,15 @@ impl LinkStats {
     }
 }
 
+/// `{"thread": {...}, "socket": {...}}`, each in fast-talker's report shape:
+/// `{"applied": [...], "adjusted": [...], "skipped": [...]}`.
+fn tuning_dict(py: Python<'_>, report: TuningReport) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("thread", &Report::from(report.thread))?;
+    d.set_item("socket", &Report::from(report.socket))?;
+    Ok(d)
+}
+
 /// Broadcast a GigE Vision discovery beacon on every Up IPv4 adapter and
 /// return the devices that answer within `timeout` seconds.
 #[pyfunction]
@@ -1085,5 +1119,6 @@ fn telegenic_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DeviceInfo>()?;
 
     m.add_function(wrap_pyfunction!(discover, m)?)?;
+    fast_talker::py::register(m)?;
     Ok(())
 }
