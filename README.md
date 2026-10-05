@@ -139,8 +139,8 @@ with telegenic.apply_process_options(
 ## Python
 
 The same library ships as a Python package via PyO3/maturin (the `py`
-feature). Install with `pip install telegenicam` once it's published, or run
-`maturin develop` from a checkout; the import name is `telegenic` either
+feature). Install with `pip install telegenicam`, or run `maturin develop`
+from a checkout; the import name is `telegenic` either
 way. The GenICam surface maps one-to-one, blocking calls release the GIL,
 and frames expose their pixels as `bytes` for `numpy.frombuffer`:
 
