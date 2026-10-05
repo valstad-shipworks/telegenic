@@ -1,6 +1,6 @@
 [package]
 name = "telegenic"
-version = "1.0.3"
+version = "2.0.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Bowan Foryt <bowan@valstad.com>"]
@@ -15,32 +15,49 @@ categories = ["science::robotics", "hardware-support", "network-programming"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-atomic-waker = "1.1.2"
 event-listener = "5.4.1"
-flume = "0.12.0"
+fast-talker = { version = "0.1.1", default-features = false, features = ["options", "serde"] }
+flume = { version = "0.12.0", features = ["async"] }
 if-addrs = "0.15.0"
 miniz_oxide = "0.9.1"
+mio = { version = "1.2.3", features = ["os-poll", "net"] }
 parking_lot = "0.12.5"
 pyo3 = { version = "0.29", optional = true }
 roxmltree = "0.21.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11.19"
-snare = { version = "1.4.0", features = ["mio-compat"] }
 thiserror = "2.0.18"
 tracing = "0.1.44"
 valuable = { version = "0.1.1", features = ["derive"], optional = true }
 zerocopy = { version = "0.8.52", features = ["derive", "std", "alloc"] }
 
 [features]
-async = ["flume/async"]
+async = []
 emulator = []
-py = ["dep:pyo3"]
+py = ["dep:pyo3", "fast-talker/pyo3"]
 abi3 = ["py", "pyo3/abi3-py310"]
 abi3t = ["py", "pyo3/abi3t-py315"]
 valuable = ["dep:valuable"]
 
 [dev-dependencies]
+proptest = "1.11.0"
+snare = "2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[[test]]
+name = "snare_driven"
+path = "tests/snare_driven.rs"
+required-features = ["emulator"]
+
+[[test]]
+name = "snare_control"
+path = "tests/snare_control.rs"
+required-features = ["emulator"]
+
+[[test]]
+name = "snare_stream"
+path = "tests/snare_stream.rs"
+required-features = ["emulator"]
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.186"

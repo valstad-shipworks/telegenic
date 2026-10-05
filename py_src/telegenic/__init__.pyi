@@ -29,6 +29,8 @@ from __future__ import annotations
 import enum
 from typing import Iterator, final
 
+from ._options import SocketOptionsLike, ThreadOptionsLike
+
 __version__: str
 
 __all__ = [
@@ -108,6 +110,8 @@ class Camera:
         heartbeat_timeout: float = 3.0,
         exclusive: bool = False,
         local_ip: str | None = None,
+        thread: ThreadOptionsLike = None,
+        control_socket: SocketOptionsLike = None,
     ) -> Camera:
         """Create a disconnected camera targeting ``ip:3956``.
 
@@ -122,6 +126,20 @@ class Camera:
             even read).
         :param local_ip: Bind the control socket to this local address, for
             multi-homed hosts.
+        :param thread: Options the GVCP worker applies to itself during
+            :meth:`connect`, e.g. ``[("cpu_affinity", [2])]``. Accepted:
+            ``cpu_affinity``, ``prefault_stack``, ``linux_nice``,
+            ``unix_scheduler`` (``other``/``batch``/``idle``),
+            ``win_priority`` below ``time_critical``,
+            ``win_disable_power_throttling``, ``macos_qos``. Real-time
+            classes are refused: this thread blocks on slow round-trips.
+            Options for another platform, or that this one cannot do, are
+            skipped with a warning. Process-wide settings are the
+            application's to make.
+        :param control_socket: Options for the GVCP socket, applied right
+            after bind: ``recv_buffer``, ``bind_device``, ``dscp``,
+            ``linux_priority``. The busy-poll options, ``send_buffer``,
+            ``dont_fragment`` and ``win_cpu_affinity`` are refused.
         :raises ValueError: if an IP string does not parse.
         """
 
@@ -188,6 +206,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> Acquisition:
         """Start continuous acquisition, returning a guard that owns the
         whole lifecycle.
@@ -203,6 +223,16 @@ class Camera:
             negotiate the largest the link carries.
         :param packet_delay: Inter-packet delay in device timestamp ticks.
         :param resend: Request resends for missing packets.
+        :param thread: Options the GVSP worker applies to itself before the
+            stream opens. Every thread option except
+            ``macos_time_constraint`` is accepted. Options for another
+            platform, or that this one cannot do, are skipped with a warning.
+        :param stream_socket: Options for the GVSP socket, applied right
+            after bind; ``None`` keeps the default 8 MiB ``recv_buffer``.
+            Accepted: ``recv_buffer``, ``bind_device``, the
+            ``linux_busy_poll`` trio and ``win_cpu_affinity``.
+            ``send_buffer``, ``dont_fragment``, ``dscp`` and
+            ``linux_priority`` are refused.
         :raises ValueError: while another acquisition or snapshot session
             is active.
         """
@@ -216,6 +246,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> Frame:
         """Capture exactly one frame, opening and closing the stream around
         it. For repeated captures use :meth:`snapshot_session`, which pays
@@ -238,6 +270,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> SnapshotSession:
         """Open a stream channel for on-demand single-frame capture.
 

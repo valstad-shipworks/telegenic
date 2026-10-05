@@ -7,25 +7,34 @@ use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 
 use flume::{Receiver, TryRecvError};
-use snare::mio::net::UdpSocket;
-use snare::mio::{Events, Interest, Poll, Token, Waker};
+use mio::net::UdpSocket;
+use mio::{Events, Interest, Poll, Token, Waker};
 
+use crate::clock::{self, Instant};
 use crate::error::CameraError;
 use crate::gige::proto::bootstrap;
 use crate::gige::proto::gvcp::{self, Ack};
 use crate::gige::{GigeConfig, GvcpEvent, Shared};
 use crate::handle::ResponseHandle;
 use crate::rx_timestamp;
-use crate::thread_util::ThreadHandle;
+use crate::thread_util::{ExitGuard, ThreadHandle};
+use crate::tuning::{self, SocketRole, ThreadRole};
 use crate::wire::{self, ControlTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
 pub(crate) const TOK_WAKER: Token = Token(1);
 
 const RECV_BUF: usize = 0xffff;
+/// Most bytes reserved up front for a memory read; longer reads grow as
+/// their chunks arrive.
+const READ_MEM_PREALLOC: usize = 1 << 20;
+/// Longest a run of PENDING_ACKs may hold one transaction past its send,
+/// so a device (or a corrupted ack) cannot wedge the channel and the
+/// heartbeats queued behind it.
+const PENDING_ACK_BUDGET: Duration = Duration::from_secs(120);
 
 /// Messages from `GigECamera` clones to the worker.
 pub(crate) enum ToWorker {
@@ -94,6 +103,7 @@ struct Inflight {
     sent: Vec<u8>,
     id: u16,
     deadline: Instant,
+    pending_limit: Instant,
     tries_left: u8,
     op: Op,
 }
@@ -167,20 +177,19 @@ impl Runner {
         if let Some(sink) = &self.telemetry
             && let Some(tx) = wire::control_tx(datagram, retry)
         {
-            sink.sent(&tx, SystemTime::now());
+            sink.sent(&tx, clock::system_now());
         }
         Ok(sent)
     }
 
     pub(crate) fn run(mut self, mut poll: Poll) {
-        self.cfg.thread_cfg.apply_logged();
         if let Some(sink) = &self.telemetry {
             sink.warmup();
         }
         let mut events = Events::with_capacity(16);
         let mut buf = [0u8; RECV_BUF];
         while self.thread.should_live() && !self.control_lost {
-            if let Err(e) = poll.poll(&mut events, Some(Duration::from_millis(10))) {
+            if let Err(e) = poll.poll(&mut events, self.poll_timeout()) {
                 if e.kind() == ErrorKind::Interrupted {
                     continue;
                 }
@@ -202,6 +211,10 @@ impl Runner {
         self.shutdown();
     }
 
+    fn poll_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_millis(10))
+    }
+
     fn drain_socket(&mut self, buf: &mut [u8]) {
         loop {
             let read = if self.kernel_ts {
@@ -216,7 +229,7 @@ impl Runner {
                     if src.ip() != self.device_addr.ip() {
                         continue;
                     }
-                    let at = ts.unwrap_or_else(SystemTime::now);
+                    let at = ts.unwrap_or_else(clock::system_now);
                     if let Some(sink) = &self.telemetry
                         && let Some(rx) = wire::control_rx(&buf[..n])
                     {
@@ -252,7 +265,8 @@ impl Runner {
             return;
         }
         if let Some(ms) = ack.pending_ack_timeout_ms() {
-            inflight.deadline = Instant::now() + Duration::from_millis(u64::from(ms));
+            let extended = Instant::now() + Duration::from_millis(u64::from(ms));
+            inflight.deadline = extended.min(inflight.pending_limit.max(inflight.deadline));
             self.shared.stats.lock().pending_acks += 1;
             return;
         }
@@ -409,7 +423,7 @@ impl Runner {
                 Ok(ToWorker::ReadMem { addr, len, handle }) => {
                     let op = Op::ReadMem {
                         handle,
-                        acc: Vec::with_capacity(len as usize),
+                        acc: Vec::with_capacity((len as usize).min(READ_MEM_PREALLOC)),
                         want: len as usize,
                         next_addr: addr,
                     };
@@ -505,10 +519,12 @@ impl Runner {
             return;
         }
         self.shared.stats.lock().commands += 1;
+        let now = Instant::now();
         self.inflight = Some(Inflight {
             sent: datagram,
             id,
-            deadline: Instant::now() + self.cfg.gvcp_timeout,
+            deadline: now + self.cfg.gvcp_timeout,
+            pending_limit: now + PENDING_ACK_BUDGET,
             tries_left: self.cfg.retries,
             op,
         });
@@ -525,6 +541,7 @@ impl Runner {
             inflight.tries_left -= 1;
             inflight.deadline = Instant::now() + self.cfg.gvcp_timeout;
             self.shared.stats.lock().retries += 1;
+            self.shared.link.retransmit();
             tracing::trace!(
                 id = inflight.id,
                 tries_left = inflight.tries_left,
@@ -641,6 +658,8 @@ pub(crate) fn spawn(
     cfg: GigeConfig,
     telemetry: Option<ControlTelemetry>,
 ) -> Result<(ThreadHandle, SocketAddr), CameraError> {
+    tuning::check_thread(ThreadRole::Control, &cfg.thread)?;
+    tuning::check_socket(SocketRole::UdpControl, &cfg.control_socket)?;
     let bind_addr = cfg
         .local_addr
         .unwrap_or_else(|| SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0));
@@ -649,6 +668,7 @@ pub(crate) fn spawn(
     let local_addr = socket
         .local_addr()
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
+    tuning::apply_socket(SocketRole::UdpControl, &socket, &cfg.control_socket)?;
 
     let kernel_ts = rx_timestamp::enable_logged(&socket, "gvcp");
 
@@ -664,9 +684,21 @@ pub(crate) fn spawn(
     thread.set_waker(waker);
     let thread_for_worker = thread.to_pass_in();
 
-    let join = snare::thread::Builder::new()
+    let (started_tx, started_rx) = flume::bounded(1);
+    let join = std::thread::Builder::new()
         .name("telegenic-gvcp".into())
         .spawn(move || {
+            let _exit = ExitGuard(thread_for_worker.to_pass_in());
+            let _tuning = match tuning::apply_thread(ThreadRole::Control, &cfg.thread) {
+                Ok(report) => {
+                    let _ = started_tx.send(Ok(()));
+                    report
+                }
+                Err(e) => {
+                    let _ = started_tx.send(Err(e));
+                    return;
+                }
+            };
             let runner = Runner::new(
                 socket,
                 rx,
@@ -680,6 +712,280 @@ pub(crate) fn spawn(
         })
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
     thread.set_handle(join);
+    started_rx
+        .recv()
+        .map_err(|_| CameraError::Spawn("gvcp worker exited during startup".into()))??;
 
     Ok((thread, local_addr))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Acknowledge matching, request-id wraps, corrupted acknowledges and
+    //! chunked memory reads, driven datagram by datagram against the worker
+    //! with no device behind it.
+
+    use super::*;
+    use crate::gige::GvcpEvent;
+    use crate::link::LinkCounters;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngSeed};
+
+    fn config(cases: u32) -> Config {
+        Config {
+            cases,
+            rng_seed: RngSeed::Fixed(0x7e1e_9e41_c0de),
+            failure_persistence: None,
+            ..Config::default()
+        }
+    }
+
+    struct Rig {
+        runner: Runner,
+        device: SocketAddr,
+        _device_socket: std::net::UdpSocket,
+        _commands: flume::Sender<ToWorker>,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let device_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let device = device_socket.local_addr().unwrap();
+            let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let mut cfg = GigeConfig::new(device.ip());
+            cfg.addr = device;
+            let (commands, rx) = flume::unbounded();
+            let shared = Arc::new(Shared::new(Arc::new(LinkCounters::default())));
+            Self {
+                runner: Runner::new(socket, rx, shared, ThreadHandle::new(), cfg, None, false),
+                device,
+                _device_socket: device_socket,
+                _commands: commands,
+            }
+        }
+
+        fn read_register(&mut self, addr: u32) -> (ResponseHandle<u32>, u16) {
+            let handle = ResponseHandle::new();
+            self.runner.enqueue(
+                Op::ReadReg(handle.clone()),
+                PendingSend::ReadRegs(vec![addr]),
+            );
+            self.runner.pump();
+            (handle, self.inflight_id())
+        }
+
+        fn inflight_id(&self) -> u16 {
+            self.runner
+                .inflight
+                .as_ref()
+                .expect("a transaction in flight")
+                .id
+        }
+
+        fn deliver(&mut self, datagram: &[u8]) {
+            self.runner.on_datagram(datagram, self.device);
+        }
+
+        fn unsolicited(&self) -> u64 {
+            self.runner.shared.stats.lock().unsolicited
+        }
+    }
+
+    fn ack(status: u16, answer: u16, id: u16, payload: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&status.to_be_bytes());
+        b.extend_from_slice(&answer.to_be_bytes());
+        b.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        b.extend_from_slice(&id.to_be_bytes());
+        b.extend_from_slice(payload);
+        b
+    }
+
+    fn previous_id(id: u16) -> u16 {
+        if id <= 1 { 0xfffe } else { id - 1 }
+    }
+
+    fn value_of(handle: &ResponseHandle<u32>) -> Option<Result<u32, String>> {
+        handle
+            .is_set()
+            .then(|| handle.get().map_err(|e| e.to_string()))
+    }
+
+    proptest! {
+        #![proptest_config(config(64))]
+
+        /// From any request id — including just before the wrap — every
+        /// transaction is answered by the acknowledge carrying its own id:
+        /// acknowledges for the previous or the next id (a late duplicate, a
+        /// stray) are counted as unsolicited and change nothing, across as
+        /// many wraps as the run takes.
+        #[test]
+        fn acks_match_their_transaction_across_request_id_wraps(
+            start in prop_oneof![0u16..16, 0xffe0u16..=0xffff, any::<u16>()],
+            values in prop::collection::vec(any::<u32>(), 1..300),
+        ) {
+            let mut rig = Rig::new();
+            rig.runner.next_id = start;
+            let mut stray = 0;
+            for (k, &value) in values.iter().enumerate() {
+                let (handle, id) = rig.read_register(0x0a00);
+                prop_assert!(id != 0 && id != gvcp::DISCOVERY_ID, "id {}", id);
+                let want = ((u32::from(start.min(0xfffe)) + k as u32) % 0xfffe) as u16 + 1;
+                prop_assert_eq!(id, want);
+                for other in [previous_id(id), gvcp::next_id(id)] {
+                    rig.deliver(&ack(0, gvcp::READ_REGISTER_ACK, other, &(!value).to_be_bytes()));
+                    stray += 1;
+                }
+                prop_assert!(!handle.is_set());
+                rig.deliver(&ack(0, gvcp::READ_REGISTER_ACK, id, &value.to_be_bytes()));
+                prop_assert_eq!(value_of(&handle), Some(Ok(value)));
+                prop_assert_eq!(rig.unsolicited(), stray);
+            }
+        }
+
+        /// One flipped header bit in the acknowledge of a register read
+        /// never completes it with a value other than the register's: the
+        /// datagram is ignored (the transaction keeps waiting), fails the
+        /// transaction, or completes it with the right value. GVCP carries
+        /// no checksum of its own, so flipped payload bits are the UDP
+        /// checksum's to catch and are not exercised here.
+        #[test]
+        fn a_corrupted_ack_header_never_yields_a_wrong_value(value in any::<u32>(), bit in 0usize..64) {
+            let mut rig = Rig::new();
+            let (handle, id) = rig.read_register(0x0a00);
+            let mut datagram = ack(0, gvcp::READ_REGISTER_ACK, id, &value.to_be_bytes());
+            datagram[bit / 8] ^= 1 << (bit % 8);
+            rig.deliver(&datagram);
+            match value_of(&handle) {
+                None => prop_assert!(rig.runner.inflight.is_some()),
+                Some(Ok(v)) => prop_assert_eq!(v, value, "flipped bit {}", bit),
+                Some(Err(_)) => prop_assert!(rig.runner.inflight.is_none()),
+            }
+        }
+
+        /// A PENDING_ACK — or a corrupted acknowledge that reads as one (a
+        /// single flipped bit turns READ_REGISTER_ACK 0x0081 into
+        /// PENDING_ACK 0x0089, its register value then read as the
+        /// timeout) — never pushes the deadline past the protocol's 16-bit
+        /// millisecond limit.
+        #[test]
+        fn no_ack_extends_a_deadline_past_the_pending_ack_limit(value in any::<u32>(), bit in 0usize..64) {
+            let mut rig = Rig::new();
+            let (_handle, id) = rig.read_register(0x0a00);
+            let mut datagram = ack(0, gvcp::READ_REGISTER_ACK, id, &value.to_be_bytes());
+            datagram[bit / 8] ^= 1 << (bit % 8);
+            let before = Instant::now();
+            rig.deliver(&datagram);
+            if let Some(inflight) = &rig.runner.inflight {
+                let limit = before + Duration::from_millis(u64::from(u16::MAX)) + Duration::from_secs(1);
+                prop_assert!(inflight.deadline <= limit, "deadline pushed {:?} out", inflight.deadline - before);
+            }
+        }
+
+        /// A memory read longer than one transaction goes out in chunks at
+        /// consecutive addresses; a device that answers each chunk with
+        /// fewer bytes than asked has the next chunk start where its data
+        /// ended, and the result is exactly the memory read. A late copy of
+        /// an earlier chunk's acknowledge changes nothing.
+        #[test]
+        fn chunked_memory_reads_reassemble_exactly(
+            base in 0u32..0x1000,
+            want in 1usize..3000,
+            shorts in prop::collection::vec(1usize..=gvcp::DATA_SIZE_MAX, 1..40),
+            seed in any::<u8>(),
+        ) {
+            let base = base * 4;
+            let memory: Vec<u8> = (0..0x8000u32).map(|i| (i as u8).wrapping_mul(31) ^ seed).collect();
+            let mut rig = Rig::new();
+            let handle = ResponseHandle::new();
+            let op = Op::ReadMem {
+                handle: handle.clone(),
+                acc: Vec::new(),
+                want,
+                next_addr: base,
+            };
+            rig.runner.enqueue(op, PendingSend::ReadMemChunk);
+            rig.runner.pump();
+            let mut expected_addr = base as usize;
+            let mut previous: Option<Vec<u8>> = None;
+            for k in 0.. {
+                if handle.is_set() {
+                    break;
+                }
+                prop_assert!(k < 10_000, "the read never finished");
+                let inflight = rig.runner.inflight.as_ref().expect("a chunk in flight");
+                let cmd = gvcp::Cmd::parse(&inflight.sent).unwrap();
+                let addr = u32::from_be_bytes(cmd.payload[..4].try_into().unwrap()) as usize;
+                let count = u32::from_be_bytes(cmd.payload[4..8].try_into().unwrap()) as usize;
+                prop_assert_eq!(addr, expected_addr);
+                let remaining = base as usize + want - addr;
+                prop_assert_eq!(count, remaining.next_multiple_of(4).min(gvcp::DATA_SIZE_MAX));
+                let n = shorts[k % shorts.len()].min(count);
+                let mut payload = (addr as u32).to_be_bytes().to_vec();
+                payload.extend_from_slice(&memory[addr..addr + n]);
+                let id = inflight.id;
+                if let Some(late) = &previous {
+                    rig.deliver(late);
+                }
+                let datagram = ack(0, gvcp::READ_MEMORY_ACK, id, &payload);
+                rig.deliver(&datagram);
+                previous = Some(datagram);
+                expected_addr += n;
+            }
+            let got = handle.get().map_err(|e| e.to_string());
+            prop_assert_eq!(got, Ok(memory[base as usize..base as usize + want].to_vec()));
+        }
+
+        /// Device events decode from any payload without panicking, each
+        /// field from its offset, and only events that ask for one get an
+        /// acknowledge; other commands on the control socket are dropped.
+        #[test]
+        fn device_commands_decode_and_only_requested_events_are_acknowledged(
+            command in prop_oneof![
+                Just(gvcp::EVENT_CMD),
+                Just(gvcp::EVENTDATA_CMD),
+                any::<u16>(),
+            ],
+            flags in any::<u8>(),
+            id in any::<u16>(),
+            payload in prop::collection::vec(any::<u8>(), 0..64),
+        ) {
+            let event = GvcpEvent::parse(command, &payload);
+            let at = |i: usize, n: usize| payload.get(i..i + n).map(|b| b.iter().fold(0u64, |a, &x| a << 8 | u64::from(x)));
+            prop_assert_eq!(u64::from(event.event_id), at(2, 2).unwrap_or(0));
+            prop_assert_eq!(u64::from(event.stream_channel), at(4, 2).unwrap_or(0));
+            prop_assert_eq!(u64::from(event.block_id), at(6, 2).unwrap_or(0));
+            prop_assert_eq!(event.timestamp, at(8, 8).unwrap_or(0));
+            prop_assert_eq!(&event.data[..], payload.get(16..).unwrap_or_default());
+            prop_assert_eq!(&event.raw, &payload);
+
+            let is_event = command == gvcp::EVENT_CMD || command == gvcp::EVENTDATA_CMD;
+            let ack_expected = is_event && flags & gvcp::FLAG_ACK_REQUIRED != 0;
+            let source = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            // Loopback delivery is queued, not immediate: give an expected
+            // ack time to land under a loaded test run.
+            let wait = if ack_expected { 1000 } else { 5 };
+            source.set_read_timeout(Some(Duration::from_millis(wait))).unwrap();
+            let mut rig = Rig::new();
+            let (tx, events) = flume::unbounded();
+            rig.runner.event_txs.push(tx);
+            let mut datagram = vec![gvcp::PACKET_TYPE_CMD, flags];
+            datagram.extend_from_slice(&command.to_be_bytes());
+            datagram.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+            datagram.extend_from_slice(&id.to_be_bytes());
+            datagram.extend_from_slice(&payload);
+            rig.runner.on_datagram(&datagram, source.local_addr().unwrap());
+            prop_assert_eq!(events.try_iter().count(), usize::from(is_event));
+            let mut buf = [0u8; 64];
+            let acked = source.recv_from(&mut buf).ok().map(|(n, _)| {
+                let a = gvcp::Ack::parse(&buf[..n]).unwrap();
+                (a.answer, a.ack_id)
+            });
+            if ack_expected {
+                prop_assert_eq!(acked, Some((command + 1, id)));
+            } else {
+                prop_assert_eq!(acked, None);
+            }
+        }
+    }
 }

@@ -12,6 +12,9 @@ use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::evaluator::{Expr, Value};
 use crate::genicam::port::PortIo;
 
+/// Largest register a description may size from a device-read length.
+const MAX_REGISTER_LENGTH: usize = 16 << 20;
+
 #[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeId(pub(crate) u32);
@@ -404,7 +407,7 @@ impl Genicam {
                         msb,
                     },
             } => {
-                let length = self.ref_int(&common.length, port)? as usize;
+                let length = self.register_length(id, &common.length, port)?;
                 let bytes = if lsb.is_some() || msb.is_some() {
                     // Masked field: read-modify-write the whole register.
                     let current = self.register_read(id, port)?;
@@ -561,7 +564,7 @@ impl Genicam {
                 common,
                 kind: RegKind::Float { endianness },
             } => {
-                let length = self.ref_int(&common.length, port)? as usize;
+                let length = self.register_length(id, &common.length, port)?;
                 let bytes = encode_float(v, length, endianness)
                     .map_err(|e| GenicamError::Formula(self.name_of(id).to_string(), e))?;
                 self.register_write(id, &bytes, port)
@@ -587,7 +590,10 @@ impl Genicam {
                 ValueRef::LitStr(s) => Ok(s.clone()),
                 ValueRef::Link(link) => {
                     let target = self.resolve(link)?;
-                    self.string_value(target, port)
+                    self.enter(id)?;
+                    let result = self.string_value(target, port);
+                    self.leave();
+                    result
                 }
                 _ => Err(GenicamError::WrongType(self.name_of(id).to_string())),
             },
@@ -636,7 +642,10 @@ impl Genicam {
                 }
                 ValueRef::Link(link) => {
                     let target = self.resolve(link)?;
-                    self.set_string_value(target, s, port)
+                    self.enter(id)?;
+                    let result = self.set_string_value(target, s, port);
+                    self.leave();
+                    result
                 }
                 _ => Err(GenicamError::Access(self.name_of(id).to_string())),
             },
@@ -644,7 +653,7 @@ impl Genicam {
                 common,
                 kind: RegKind::Text,
             } => {
-                let length = self.ref_int(&common.length, port)? as usize;
+                let length = self.register_length(id, &common.length, port)?;
                 let mut bytes = vec![0u8; length];
                 let n = s.len().min(length);
                 bytes[..n].copy_from_slice(&s.as_bytes()[..n]);
@@ -781,21 +790,27 @@ impl Genicam {
         }
     }
 
+    /// The access mode of the node a value chain ends at; a chain that
+    /// loops back on itself is read-only, as nothing can be written there.
     pub fn access_mode(&self, id: NodeId) -> AccessMode {
-        match &self.nodes[id.0 as usize].node {
-            Node::Register { common, .. } => common.access,
-            Node::SwissKnife { .. } => AccessMode::RO,
-            Node::Integer { value, .. }
-            | Node::Float { value, .. }
-            | Node::Boolean { value, .. }
-            | Node::Enumeration { value, .. } => match value {
-                ValueRef::Link(Link::Id(id)) => self.access_mode(*id),
-                ValueRef::LitInt(_) | ValueRef::LitFloat(_) => AccessMode::RW,
-                _ => AccessMode::RO,
-            },
-            Node::Command { .. } => AccessMode::WO,
-            _ => AccessMode::RO,
+        let mut id = id;
+        for _ in 0..=self.nodes.len() {
+            match &self.nodes[id.0 as usize].node {
+                Node::Register { common, .. } => return common.access,
+                Node::SwissKnife { .. } => return AccessMode::RO,
+                Node::Integer { value, .. }
+                | Node::Float { value, .. }
+                | Node::Boolean { value, .. }
+                | Node::Enumeration { value, .. } => match value {
+                    ValueRef::Link(Link::Id(next)) => id = *next,
+                    ValueRef::LitInt(_) | ValueRef::LitFloat(_) => return AccessMode::RW,
+                    _ => return AccessMode::RO,
+                },
+                Node::Command { .. } => return AccessMode::WO,
+                _ => return AccessMode::RO,
+            }
         }
+        AccessMode::RO
     }
 
     fn eval_converter(
@@ -913,12 +928,32 @@ impl Genicam {
         for term in &common.address_terms {
             address = address.wrapping_add(self.ref_int(term, port)?);
         }
-        let length = if common.length.is_none() {
-            4
-        } else {
-            self.ref_int(&common.length, port)?
-        };
-        Ok((address as u64, length as usize))
+        let length = self.register_length(id, &common.length, port)?;
+        Ok((address as u64, length))
+    }
+
+    /// A register's length in bytes (4 when the description gives none),
+    /// rejected when negative or past [`MAX_REGISTER_LENGTH`]: a length
+    /// read from the device must not size an allocation unchecked.
+    fn register_length(
+        &mut self,
+        id: NodeId,
+        length: &ValueRef,
+        port: &dyn PortIo,
+    ) -> GenicamResult<usize> {
+        if length.is_none() {
+            return Ok(4);
+        }
+        let value = self.ref_int(length, port)?;
+        usize::try_from(value)
+            .ok()
+            .filter(|&l| l <= MAX_REGISTER_LENGTH)
+            .ok_or_else(|| GenicamError::OutOfRange {
+                name: self.name_of(id).to_string(),
+                value,
+                min: 0,
+                max: MAX_REGISTER_LENGTH as i64,
+            })
     }
 
     fn register_read(&mut self, id: NodeId, port: &dyn PortIo) -> GenicamResult<Vec<u8>> {
@@ -992,18 +1027,9 @@ fn extract_int(
     let mut value = load_u64(bytes, endianness);
 
     let bits = 8 * length as u32;
-    let (lsb, msb) = match (register_lsb, register_msb, endianness) {
-        (None, None, _) => (0, bits - 1),
-        (lsb, msb, Endianness::Little) => (lsb.unwrap_or(0), msb.unwrap_or(lsb.unwrap_or(0))),
-        (lsb, msb, Endianness::Big) => {
-            let l = lsb.or(msb).unwrap_or(0);
-            let m = msb.or(lsb).unwrap_or(0);
-            (bits - l - 1, bits - m - 1)
-        }
-    };
-    if msb < lsb || msb >= bits {
-        return Err(format!("bad bit range {lsb}..{msb} for {length} bytes"));
-    }
+    let (lsb, msb) = bit_range(bits, register_lsb, register_msb, endianness).ok_or_else(|| {
+        format!("bad bit range {register_lsb:?}..{register_msb:?} for {length} bytes")
+    })?;
 
     let width = msb - lsb + 1;
     let mask = if width >= 64 {
@@ -1016,6 +1042,28 @@ fn extract_int(
         value |= u64::MAX ^ (mask >> lsb);
     }
     Ok(value as i64)
+}
+
+/// The `(lsb, msb)` bit positions, counted from the least significant bit
+/// of the loaded value, that a masked register's LSB/MSB select in a
+/// register of `bits` bits. Big-endian registers number their bits from
+/// the most significant end. `None` when the range does not fit.
+fn bit_range(
+    bits: u32,
+    register_lsb: Option<u32>,
+    register_msb: Option<u32>,
+    endianness: Endianness,
+) -> Option<(u32, u32)> {
+    let (lsb, msb) = match (register_lsb, register_msb, endianness) {
+        (None, None, _) => (0, bits - 1),
+        (lsb, msb, Endianness::Little) => (lsb.unwrap_or(0), msb.unwrap_or(lsb.unwrap_or(0))),
+        (lsb, msb, Endianness::Big) => {
+            let l = lsb.or(msb).unwrap_or(0);
+            let m = msb.or(lsb).unwrap_or(0);
+            ((bits - 1).checked_sub(l)?, (bits - 1).checked_sub(m)?)
+        }
+    };
+    (lsb <= msb && msb < bits).then_some((lsb, msb))
 }
 
 /// Read-modify-write companion of [`extract_int`].
@@ -1033,18 +1081,9 @@ fn insert_int(
     }
     let mut value = load_u64(current, endianness);
     let bits = 8 * length as u32;
-    let (lsb, msb) = match (register_lsb, register_msb, endianness) {
-        (None, None, _) => (0, bits - 1),
-        (lsb, msb, Endianness::Little) => (lsb.unwrap_or(0), msb.unwrap_or(lsb.unwrap_or(0))),
-        (lsb, msb, Endianness::Big) => {
-            let l = lsb.or(msb).unwrap_or(0);
-            let m = msb.or(lsb).unwrap_or(0);
-            (bits - l - 1, bits - m - 1)
-        }
-    };
-    if msb < lsb || msb >= bits {
-        return Err(format!("bad bit range {lsb}..{msb} for {length} bytes"));
-    }
+    let (lsb, msb) = bit_range(bits, register_lsb, register_msb, endianness).ok_or_else(|| {
+        format!("bad bit range {register_lsb:?}..{register_msb:?} for {length} bytes")
+    })?;
     let width = msb - lsb + 1;
     let mask = if width >= 64 {
         u64::MAX

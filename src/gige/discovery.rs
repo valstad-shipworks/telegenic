@@ -16,11 +16,10 @@
 //! the broadcast address instead of routing a unicast reply.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::time::Duration;
 
-use snare::net::UdpSocket;
-
+use crate::clock::Instant;
 use crate::error::{CameraError, Result};
 use crate::gige::proto::bootstrap::DeviceInfo;
 use crate::gige::proto::gvcp::{self, Ack};

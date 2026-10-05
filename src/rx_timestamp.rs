@@ -60,15 +60,6 @@ pub fn enable_rx_timestamping(socket: &impl AsRawFd) -> io::Result<()> {
     }
 }
 
-/// Non-unix stub: always fails with `Unsupported`.
-#[cfg(not(unix))]
-pub fn enable_rx_timestamping<T>(_socket: &T) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "kernel rx timestamps are unix-only",
-    ))
-}
-
 /// [`enable_rx_timestamping`] with the outcome traced against `which`.
 /// Returns whether reads from this socket should go through
 /// [`recv_from_timestamped`].

@@ -36,21 +36,26 @@
 #[macro_use]
 mod valuable_error;
 
+mod clock;
 #[cfg(feature = "emulator")]
 pub mod emulator;
 pub mod error;
 pub mod genicam;
 pub mod gige;
 pub mod handle;
+mod link;
 #[cfg(feature = "py")]
 mod py;
 mod rx_timestamp;
 mod thread_util;
+mod tuning;
 #[cfg(feature = "valuable")]
 mod valuable_impls;
 pub mod wire;
 
 pub use error::{CameraError, GenicamError, Result};
+pub use fast_talker;
+pub use fast_talker::options::{SocketOption, ThreadOption};
 pub use genicam::{AccessMode, Acquisition, Features, GenICamera, NodeKind, SnapshotSession};
 pub use gige::PixelFormat;
 pub use gige::stream::{
@@ -58,7 +63,7 @@ pub use gige::stream::{
     StreamConfig, StreamStats,
 };
 pub use handle::ResponseHandle;
-pub use thread_util::ThreadConfig;
+pub use link::LinkStats;
 pub use wire::{
     ControlRx, ControlTelemetry, ControlTx, GvcpAck, GvcpCmd, GvspPacket, StreamTelemetry,
     TelemetrySink,

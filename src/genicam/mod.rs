@@ -84,6 +84,11 @@ impl GenICamera {
         self.transport().is_connected()
     }
 
+    /// Link-health counters, cumulative across connections and streams.
+    pub fn link_stats(&self) -> crate::LinkStats {
+        self.transport().link_stats()
+    }
+
     /// The transport-level handle, for register IO and stream control.
     pub fn transport(&self) -> &GigECamera {
         match self {
@@ -116,28 +121,19 @@ impl GenICamera {
     /// Every node name in the device description (features and the register/
     /// computation nodes behind them).
     pub fn feature_names(&self) -> GenicamResult<Vec<String>> {
-        let graph = self
-            .transport()
-            .genicam_ref()
-            .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
+        let graph = self.transport().genicam_graph()?;
         Ok(graph.node_names().map(str::to_string).collect())
     }
 
     pub fn node_kind(&self, name: &str) -> GenicamResult<NodeKind> {
-        let graph = self
-            .transport()
-            .genicam_ref()
-            .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
+        let graph = self.transport().genicam_graph()?;
         Ok(graph.kind_of(graph.lookup(name)?))
     }
 
     /// The feature names a `Category` lists, in XML order (empty for
     /// non-categories). Walk from `"Root"` to traverse the whole tree.
     pub fn category_features(&self, name: &str) -> GenicamResult<Vec<String>> {
-        let graph = self
-            .transport()
-            .genicam_ref()
-            .ok_or_else(|| GenicamError::Xml("feature model not loaded".into()))?;
+        let graph = self.transport().genicam_graph()?;
         let id = graph.lookup(name)?;
         Ok(graph
             .category_features(id)

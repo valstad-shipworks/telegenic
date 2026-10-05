@@ -7,9 +7,10 @@
 //! GenICam description), the GVCP acknowledge encoders, and a GVSP SingleFrame
 //! leader/payload/trailer encoder. It is socket-agnostic: [`GigeDevice`] turns an
 //! inbound GVCP datagram into a [`Reaction`] and builds GVSP packets for a mono8
-//! buffer; the host owns the sockets (std loopback in unit tests, `snare::net` in
-//! theater) and the frame source.
+//! buffer; the host owns the sockets (std loopback in unit tests, a simulated
+//! network in a cell simulator) and the frame source.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use crate::gige::proto::gvcp;
@@ -74,16 +75,37 @@ pub struct Reaction {
     /// `AcquisitionStart` was executed — the host should render a frame and emit
     /// it via [`GigeDevice::frame_packets`], then clear the trigger.
     pub acquisition_started: bool,
+    /// A PACKETRESEND command arrived while packet resend is enabled (see
+    /// [`GigeDevice::set_packet_resend`]): the host should send these packets
+    /// of the frame again, each marked with [`mark_resent`].
+    pub resend: Option<ResendRequest>,
+}
+
+/// The packets a PACKETRESEND command asks for, both ends inclusive.
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResendRequest {
+    pub frame_id: u64,
+    pub first_packet: u32,
+    pub last_packet: u32,
 }
 
 /// Emulated GigE Vision device. Holds the register/memory image; the host feeds
 /// it GVCP datagrams and drives GVSP from its reactions.
+///
+/// Like a real device it answers a retransmitted command (same source, same
+/// request id as the previous one) by replaying its acknowledge instead of
+/// executing the command again.
 #[derive(Debug)]
 pub struct GigeDevice {
     mem: Vec<u8>,
     /// Source address of the most recent valid GVCP command — the requester
     /// the stream falls back to when the client advertises SCDA=0.
     ctrl_peer: Option<SocketAddr>,
+    last_reply: HashMap<SocketAddr, (u16, u16, Vec<u8>)>,
+    duplicates: u64,
+    leader_timestamp_ns: u64,
+    max_packet_size: Option<u16>,
 }
 
 impl GigeDevice {
@@ -93,6 +115,10 @@ impl GigeDevice {
         let mut dev = Self {
             mem: vec![0u8; MEM_SIZE],
             ctrl_peer: None,
+            last_reply: HashMap::new(),
+            duplicates: 0,
+            leader_timestamp_ns: 0,
+            max_packet_size: None,
         };
         dev.seed(ip, cfg);
         dev
@@ -102,9 +128,7 @@ impl GigeDevice {
         self.write_reg(bootstrap::VERSION, 0x0002_0000);
         self.write_reg(
             bootstrap::GVCP_CAPABILITY,
-            bootstrap::CAP_WRITE_MEMORY
-                | bootstrap::CAP_PACKET_RESEND
-                | bootstrap::CAP_HEARTBEAT_DISABLE,
+            bootstrap::CAP_WRITE_MEMORY | bootstrap::CAP_HEARTBEAT_DISABLE,
         );
         self.write_reg(bootstrap::HEARTBEAT_TIMEOUT, 3000);
         self.write_reg(bootstrap::N_STREAM_CHANNELS, 1);
@@ -175,8 +199,8 @@ impl GigeDevice {
     /// A client that only holds wildcard-bound sockets cannot know a concrete
     /// host IP and writes SCDA=0 alongside a real SCP. A physical camera would
     /// stay silent on that; the emulator instead streams back to the GVCP
-    /// requester's IP at SCP, so such clients (snare's virtual network routes
-    /// by the literal bound address) still receive the burst.
+    /// requester's IP at SCP, so such clients (e.g. on a simulated network
+    /// that routes by the literal bound address) still receive the burst.
     pub fn stream_dest(&self) -> Option<SocketAddr> {
         let ip = self.read_reg(bootstrap::STREAM_CHANNEL_DEST_ADDRESS);
         let port = (self.read_reg(bootstrap::STREAM_CHANNEL_PORT) & 0xffff) as u16;
@@ -187,6 +211,56 @@ impl GigeDevice {
             return Some(SocketAddr::new(Ipv4Addr::from(ip).into(), port));
         }
         self.ctrl_peer.map(|peer| SocketAddr::new(peer.ip(), port))
+    }
+
+    /// Retransmitted commands answered by replaying the cached acknowledge.
+    pub fn duplicates(&self) -> u64 {
+        self.duplicates
+    }
+
+    /// The device timestamp the next GVSP leaders carry, in nanoseconds (the
+    /// advertised tick frequency is 1 GHz, so ticks and nanoseconds agree).
+    pub fn set_leader_timestamp_ns(&mut self, ns: u64) {
+        self.leader_timestamp_ns = ns;
+    }
+
+    /// Advertises (or withdraws) packet resend; while advertised, PACKETRESEND
+    /// commands come back as [`Reaction::resend`].
+    pub fn set_packet_resend(&mut self, supported: bool) {
+        let caps = self.read_reg(bootstrap::GVCP_CAPABILITY);
+        let caps = if supported {
+            caps | bootstrap::CAP_PACKET_RESEND
+        } else {
+            caps & !bootstrap::CAP_PACKET_RESEND
+        };
+        self.write_reg(bootstrap::GVCP_CAPABILITY, caps);
+    }
+
+    /// Advertises (or withdraws) message-channel events, which lets a client
+    /// open the channel; the host sends them with [`event_cmd`] to
+    /// [`message_dest`](Self::message_dest).
+    pub fn set_event_support(&mut self, supported: bool) {
+        let caps = self.read_reg(bootstrap::GVCP_CAPABILITY);
+        let caps = if supported {
+            caps | bootstrap::CAP_EVENT
+        } else {
+            caps & !bootstrap::CAP_EVENT
+        };
+        self.write_reg(bootstrap::GVCP_CAPABILITY, caps);
+    }
+
+    /// Where the client opened the message channel (MCDA:MCP), if it did.
+    pub fn message_dest(&self) -> Option<SocketAddr> {
+        let ip = self.read_reg(bootstrap::MESSAGE_CHANNEL_DEST_ADDRESS);
+        let port = (self.read_reg(bootstrap::MESSAGE_CHANNEL_PORT) & 0xffff) as u16;
+        (ip != 0 && port != 0).then(|| SocketAddr::new(Ipv4Addr::from(ip).into(), port))
+    }
+
+    /// The largest stream packet size the device transmits: a larger SCPS
+    /// write is rounded down to it, fire-test packets included, as devices
+    /// with a smaller packet buffer do. `None` takes any size.
+    pub fn set_max_packet_size(&mut self, max: Option<u16>) {
+        self.max_packet_size = max;
     }
 
     /// Clears the acquisition trigger (SingleFrame self-stop).
@@ -203,7 +277,7 @@ impl GigeDevice {
         let (w, h) = (self.width(), self.height());
 
         let mut packets = Vec::new();
-        packets.push(build_leader(frame_id, w, h));
+        packets.push(build_leader(frame_id, w, h, self.leader_timestamp_ns));
         let chunks = mono8.chunks(block);
         let n = chunks.len() as u32;
         for (i, chunk) in chunks.enumerate() {
@@ -220,6 +294,26 @@ impl GigeDevice {
             return Reaction::default();
         };
         self.ctrl_peer = Some(src);
+        if let Some((command, req_id, reply)) = self.last_reply.get(&src)
+            && (*command, *req_id) == (cmd.command, cmd.req_id)
+        {
+            self.duplicates += 1;
+            return Reaction {
+                reply: Some(reply.clone()),
+                ..Default::default()
+            };
+        }
+        let reaction = self.execute(&cmd);
+        if let Some(reply) = &reaction.reply
+            && cmd.command != gvcp::DISCOVERY_CMD
+        {
+            self.last_reply
+                .insert(src, (cmd.command, cmd.req_id, reply.clone()));
+        }
+        reaction
+    }
+
+    fn execute(&mut self, cmd: &gvcp::Cmd<'_>) -> Reaction {
         match cmd.command {
             gvcp::DISCOVERY_CMD => {
                 let block = self.mem[..bootstrap::DISCOVERY_DATA_SIZE].to_vec();
@@ -234,16 +328,20 @@ impl GigeDevice {
                 }
             }
             gvcp::READ_REGISTER_CMD => Reaction {
-                reply: Some(self.read_registers(&cmd)),
+                reply: Some(self.read_registers(cmd)),
                 ..Default::default()
             },
-            gvcp::WRITE_REGISTER_CMD => self.write_registers(&cmd),
+            gvcp::WRITE_REGISTER_CMD => self.write_registers(cmd),
             gvcp::READ_MEMORY_CMD => Reaction {
-                reply: Some(self.read_memory(&cmd)),
+                reply: Some(self.read_memory(cmd)),
                 ..Default::default()
             },
             gvcp::WRITE_MEMORY_CMD => Reaction {
-                reply: Some(self.write_memory(&cmd)),
+                reply: Some(self.write_memory(cmd)),
+                ..Default::default()
+            },
+            gvcp::PACKET_RESEND_CMD => Reaction {
+                resend: self.packet_resend(cmd),
                 ..Default::default()
             },
             _ => Reaction::default(),
@@ -252,7 +350,7 @@ impl GigeDevice {
 
     fn read_registers(&self, cmd: &gvcp::Cmd<'_>) -> Vec<u8> {
         let mut values = Vec::new();
-        for chunk in cmd.payload.chunks_exact(4) {
+        for chunk in cmd.payload.as_chunks::<4>().0 {
             let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
             if addr + 4 > self.mem.len() {
                 return nak(
@@ -274,7 +372,7 @@ impl GigeDevice {
     fn write_registers(&mut self, cmd: &gvcp::Cmd<'_>) -> Reaction {
         let mut fire_test = None;
         let mut acquisition_started = false;
-        for chunk in cmd.payload.chunks_exact(8) {
+        for chunk in cmd.payload.as_chunks::<8>().0 {
             let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             if addr as usize + 4 > self.mem.len() {
                 return Reaction {
@@ -286,7 +384,13 @@ impl GigeDevice {
                     ..Default::default()
                 };
             }
-            let value = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            let mut value = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            if addr == bootstrap::STREAM_CHANNEL_PACKET_SIZE
+                && let Some(max) = self.max_packet_size
+            {
+                let size = (value & bootstrap::SCPS_PACKET_SIZE_MASK).min(u32::from(max));
+                value = (value & !bootstrap::SCPS_PACKET_SIZE_MASK) | size;
+            }
             self.write_reg(addr, value);
             if addr == bootstrap::STREAM_CHANNEL_PACKET_SIZE
                 && value & bootstrap::SCPS_FIRE_TEST_PACKET != 0
@@ -307,6 +411,34 @@ impl GigeDevice {
             )),
             fire_test,
             acquisition_started,
+            resend: None,
+        }
+    }
+
+    fn packet_resend(&self, cmd: &gvcp::Cmd<'_>) -> Option<ResendRequest> {
+        if self.read_reg(bootstrap::GVCP_CAPABILITY) & bootstrap::CAP_PACKET_RESEND == 0 {
+            return None;
+        }
+        let word = |i: usize| {
+            cmd.payload
+                .get(i..i + 4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        if cmd.flags & gvcp::FLAG_EXTENDED_IDS != 0 {
+            let id = cmd.payload.get(12..20)?;
+            Some(ResendRequest {
+                frame_id: u64::from_be_bytes([
+                    id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+                ]),
+                first_packet: word(4)?,
+                last_packet: word(8)?,
+            })
+        } else {
+            Some(ResendRequest {
+                frame_id: u64::from(word(0)? & 0xffff),
+                first_packet: word(4)? & gvsp::PACKET_ID_MASK,
+                last_packet: word(8)? & gvsp::PACKET_ID_MASK,
+            })
         }
     }
 
@@ -400,6 +532,52 @@ fn nak(status: gvcp::GvcpStatus, answer: u16, ack_id: u16) -> Vec<u8> {
     ack(status, answer, ack_id, &[])
 }
 
+/// A PENDING_ACK for the command with `req_id`: the device needs up to
+/// `timeout_ms` more before its real acknowledge.
+pub fn pending_ack(req_id: u16, timeout_ms: u16) -> Vec<u8> {
+    let mut payload = [0u8; 4];
+    payload[2..].copy_from_slice(&timeout_ms.to_be_bytes());
+    ack(
+        gvcp::GvcpStatus::SUCCESS,
+        gvcp::PENDING_ACK,
+        req_id,
+        &payload,
+    )
+}
+
+/// An EVENT command for the message channel: `event_id` on stream channel 0
+/// for block `block_id`, stamped `timestamp` device ticks.
+pub fn event_cmd(
+    event_id: u16,
+    block_id: u16,
+    timestamp: u64,
+    req_id: u16,
+    ack_required: bool,
+) -> Vec<u8> {
+    let mut buf = vec![gvcp::PACKET_TYPE_CMD];
+    buf.push(if ack_required {
+        gvcp::FLAG_ACK_REQUIRED
+    } else {
+        0
+    });
+    buf.extend_from_slice(&gvcp::EVENT_CMD.to_be_bytes());
+    buf.extend_from_slice(&16u16.to_be_bytes());
+    buf.extend_from_slice(&req_id.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes());
+    buf.extend_from_slice(&event_id.to_be_bytes());
+    buf.extend_from_slice(&0u16.to_be_bytes());
+    buf.extend_from_slice(&block_id.to_be_bytes());
+    buf.extend_from_slice(&timestamp.to_be_bytes());
+    buf
+}
+
+/// Marks a GVSP packet as a retransmission (status `PACKET_RESEND`).
+pub fn mark_resent(packet: &mut [u8]) {
+    if let Some(status) = packet.get_mut(..2) {
+        status.copy_from_slice(&gvcp::GvcpStatus::PACKET_RESEND.0.to_be_bytes());
+    }
+}
+
 fn gvsp_header(frame_id: u64, packet_id: u32, content: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(8);
     buf.extend_from_slice(&0u16.to_be_bytes());
@@ -409,11 +587,11 @@ fn gvsp_header(frame_id: u64, packet_id: u32, content: u8) -> Vec<u8> {
     buf
 }
 
-fn build_leader(frame_id: u64, width: u32, height: u32) -> Vec<u8> {
+fn build_leader(frame_id: u64, width: u32, height: u32, timestamp: u64) -> Vec<u8> {
     let mut buf = gvsp_header(frame_id, 0, 1);
     buf.extend_from_slice(&0u16.to_be_bytes());
     buf.extend_from_slice(&gvsp::PAYLOAD_TYPE_IMAGE.to_be_bytes());
-    buf.extend_from_slice(&0u64.to_be_bytes());
+    buf.extend_from_slice(&timestamp.to_be_bytes());
     buf.extend_from_slice(&gvsp::PixelFormat::MONO8.0.to_be_bytes());
     buf.extend_from_slice(&width.to_be_bytes());
     buf.extend_from_slice(&height.to_be_bytes());
@@ -440,12 +618,14 @@ fn build_trailer(frame_id: u64, packet_id: u32) -> Vec<u8> {
 /// A minimal stored-method (uncompressed) PKZIP archive with one `theater.xml`.
 fn build_stored_zip(content: &[u8]) -> Vec<u8> {
     const NAME: &[u8] = b"theater.xml";
+    let crc = crate::genicam::zip::crc32(content);
     let mut zip = Vec::new();
     zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
     zip.extend_from_slice(&20u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 8]);
+    zip.extend_from_slice(&[0u8; 4]);
+    zip.extend_from_slice(&crc.to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
@@ -459,7 +639,8 @@ fn build_stored_zip(content: &[u8]) -> Vec<u8> {
     zip.extend_from_slice(&20u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
-    zip.extend_from_slice(&[0u8; 8]);
+    zip.extend_from_slice(&[0u8; 4]);
+    zip.extend_from_slice(&crc.to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
@@ -587,6 +768,173 @@ mod tests {
             Some(SocketAddr::new(concrete.into(), 40011)),
             "an explicit SCDA must win over the fallback"
         );
+    }
+
+    #[test]
+    fn a_retransmitted_command_replays_its_ack_without_executing() {
+        let mut dev = device();
+        let start = write_reg_cmd(ACQ_REG, 1, 9);
+        let first = dev.handle_datagram(&start, client_src());
+        assert!(first.acquisition_started);
+        dev.clear_acquisition();
+
+        let again = dev.handle_datagram(&start, client_src());
+        assert!(
+            !again.acquisition_started,
+            "a retransmit must not re-trigger"
+        );
+        assert_eq!(again.reply, first.reply);
+        assert_eq!(dev.read_reg(ACQ_REG), 0, "the write must not be re-applied");
+        assert_eq!(dev.duplicates(), 1);
+
+        let other = SocketAddr::new(Ipv4Addr::new(10, 0, 0, 101).into(), 40010);
+        assert!(dev.handle_datagram(&start, other).acquisition_started);
+        let next = dev.handle_datagram(&write_reg_cmd(ACQ_REG, 1, 10), client_src());
+        assert!(next.acquisition_started, "a new request id executes");
+        assert_eq!(dev.duplicates(), 1);
+    }
+
+    #[test]
+    fn packet_resend_is_not_advertised() {
+        let dev = device();
+        let caps = dev.read_reg(bootstrap::GVCP_CAPABILITY);
+        assert_eq!(caps & bootstrap::CAP_PACKET_RESEND, 0);
+        assert_ne!(caps & bootstrap::CAP_WRITE_MEMORY, 0);
+    }
+
+    #[test]
+    fn the_leader_carries_the_set_timestamp() {
+        let mut dev = device();
+        dev.write_reg(WIDTH_REG, 4);
+        dev.write_reg(HEIGHT_REG, 2);
+        dev.write_reg(bootstrap::STREAM_CHANNEL_PACKET_SIZE, 36 + 8);
+        dev.set_leader_timestamp_ns(1_234_567_890_123);
+        let packets = dev.frame_packets(3, &[0u8; 8]);
+        let leader = GvspView::parse(&packets[0]).unwrap();
+        let img = ImageLeader::parse(leader.data).unwrap();
+        assert_eq!(img.timestamp_ticks, 1_234_567_890_123);
+        assert_eq!(
+            dev.read_reg(bootstrap::TIMESTAMP_TICK_FREQUENCY_LOW),
+            1_000_000_000
+        );
+        assert_eq!(
+            gvsp::timestamp_to_ns(img.timestamp_ticks, 1_000_000_000),
+            1_234_567_890_123
+        );
+    }
+
+    fn resend_cmd(frame_id: u64, first: u32, last: u32, extended: bool) -> Vec<u8> {
+        let mut buf = [0u8; gvcp::RESEND_MAX_LEN];
+        let n = gvcp::encode_packet_resend(&mut buf, frame_id, first, last, extended, 65301);
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn resend_requests_parse_only_while_advertised() {
+        let mut dev = device();
+        let cmd = resend_cmd(7, 3, 5, false);
+        assert_eq!(dev.handle_datagram(&cmd, client_src()).resend, None);
+
+        dev.set_packet_resend(true);
+        assert_ne!(
+            dev.read_reg(bootstrap::GVCP_CAPABILITY) & bootstrap::CAP_PACKET_RESEND,
+            0
+        );
+        let want = ResendRequest {
+            frame_id: 7,
+            first_packet: 3,
+            last_packet: 5,
+        };
+        let r = dev.handle_datagram(&cmd, client_src());
+        assert_eq!(r.resend, Some(want));
+        assert_eq!(r.reply, None, "resend requests are never acknowledged");
+
+        let ext = resend_cmd(0x1_0000_0002, 1, 1, true);
+        assert_eq!(
+            dev.handle_datagram(&ext, client_src()).resend,
+            Some(ResendRequest {
+                frame_id: 0x1_0000_0002,
+                first_packet: 1,
+                last_packet: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn packet_size_writes_are_capped_to_the_device_maximum() {
+        let mut dev = device();
+        dev.set_max_packet_size(Some(8000));
+        let probe = 9152 | bootstrap::SCPS_FIRE_TEST_PACKET | bootstrap::SCPS_DO_NOT_FRAGMENT;
+        let r = dev.handle_datagram(
+            &write_reg_cmd(bootstrap::STREAM_CHANNEL_PACKET_SIZE, probe, 11),
+            client_src(),
+        );
+        assert_eq!(r.fire_test, Some(8000));
+        dev.handle_datagram(
+            &write_reg_cmd(bootstrap::STREAM_CHANNEL_PACKET_SIZE, 1500, 12),
+            client_src(),
+        );
+        assert_eq!(dev.read_reg(bootstrap::STREAM_CHANNEL_PACKET_SIZE), 1500);
+    }
+
+    #[test]
+    fn events_advertise_and_report_their_destination() {
+        let mut dev = device();
+        assert_eq!(
+            dev.read_reg(bootstrap::GVCP_CAPABILITY) & bootstrap::CAP_EVENT,
+            0
+        );
+        dev.set_event_support(true);
+        assert_ne!(
+            dev.read_reg(bootstrap::GVCP_CAPABILITY) & bootstrap::CAP_EVENT,
+            0
+        );
+        assert_eq!(dev.message_dest(), None);
+        let host = Ipv4Addr::new(10, 0, 0, 100);
+        dev.handle_datagram(
+            &write_reg_cmd(bootstrap::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(host), 13),
+            client_src(),
+        );
+        dev.handle_datagram(
+            &write_reg_cmd(bootstrap::MESSAGE_CHANNEL_PORT, 40010, 14),
+            client_src(),
+        );
+        assert_eq!(
+            dev.message_dest(),
+            Some(SocketAddr::new(host.into(), 40010))
+        );
+
+        let bytes = event_cmd(0x9001, 7, 123_456, 77, true);
+        let cmd = gvcp::Cmd::parse(&bytes).unwrap();
+        assert_eq!((cmd.command, cmd.req_id), (gvcp::EVENT_CMD, 77));
+        assert_ne!(cmd.flags & gvcp::FLAG_ACK_REQUIRED, 0);
+        let event = crate::gige::GvcpEvent::parse(cmd.command, cmd.payload);
+        assert_eq!(
+            (event.event_id, event.block_id, event.timestamp),
+            (0x9001, 7, 123_456)
+        );
+    }
+
+    #[test]
+    fn pending_ack_carries_its_timeout() {
+        let bytes = pending_ack(42, 2500);
+        let ack = gvcp::Ack::parse(&bytes).unwrap();
+        assert_eq!(ack.ack_id, 42);
+        assert_eq!(ack.pending_ack_timeout_ms(), Some(2500));
+    }
+
+    #[test]
+    fn a_resent_packet_is_marked_and_still_parses() {
+        let mut dev = device();
+        dev.write_reg(WIDTH_REG, 4);
+        dev.write_reg(HEIGHT_REG, 2);
+        dev.write_reg(bootstrap::STREAM_CHANNEL_PACKET_SIZE, 36 + 8);
+        let mut packet = dev.frame_packets(1, &[9u8; 8]).swap_remove(1);
+        mark_resent(&mut packet);
+        let view = GvspView::parse(&packet).unwrap();
+        assert_eq!(view.status, gvcp::GvcpStatus::PACKET_RESEND);
+        assert!(!view.status.is_error());
+        assert_eq!(view.data, &[9u8; 8]);
     }
 
     #[test]

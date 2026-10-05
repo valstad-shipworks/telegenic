@@ -184,10 +184,10 @@ impl PixelFormat {
     }
 
     /// Bytes needed for `width * height` pixels of this format (excluding
-    /// line padding).
-    pub fn image_size(self, width: u32, height: u32) -> usize {
-        (u64::from(width) * u64::from(height) * u64::from(self.bits_per_pixel())).div_ceil(8)
-            as usize
+    /// line padding), or `None` when that does not fit in `usize`.
+    pub fn image_size(self, width: u32, height: u32) -> Option<usize> {
+        let bits = u128::from(width) * u128::from(height) * u128::from(self.bits_per_pixel());
+        usize::try_from(bits.div_ceil(8)).ok()
     }
 }
 
@@ -209,14 +209,15 @@ impl std::fmt::Display for PixelFormat {
     }
 }
 
-/// Convert a device timestamp to nanoseconds using the device tick frequency.
+/// Convert a device timestamp to nanoseconds using the device tick
+/// frequency, saturating at `u64::MAX` for times past what u64 nanoseconds
+/// can hold.
 pub fn timestamp_to_ns(ticks: u64, tick_frequency: u64) -> u64 {
     if tick_frequency < 1 {
         return 0;
     }
-    let s = ticks / tick_frequency;
-    let ns = ((ticks % tick_frequency) * 1_000_000_000) / tick_frequency;
-    s * 1_000_000_000 + ns
+    let ns = u128::from(ticks) * 1_000_000_000 / u128::from(tick_frequency);
+    u64::try_from(ns).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -307,7 +308,7 @@ mod tests {
         assert_eq!(PixelFormat::RGB8.bits_per_pixel(), 24);
         // PFNC Mono12 occupies 16 bits per pixel (unpacked).
         assert_eq!(PixelFormat::MONO12.bits_per_pixel(), 16);
-        assert_eq!(PixelFormat::MONO12.image_size(4, 2), 16);
+        assert_eq!(PixelFormat::MONO12.image_size(4, 2), Some(16));
         assert_eq!(PixelFormat::MONO8.to_string(), "Mono8");
     }
 

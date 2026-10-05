@@ -24,10 +24,21 @@ pub enum CameraError {
     Unsupported(&'static str),
     #[error("worker thread failed to start: {0}")]
     Spawn(String),
+    /// A thread or socket option the named worker does not accept.
+    #[error("{driver} does not accept option {option}")]
+    InvalidOption {
+        option: String,
+        driver: &'static str,
+    },
 }
 
 #[cfg(feature = "valuable")]
-error_valuable!(CameraError, "CameraError", Nak { command, status });
+error_valuable!(
+    CameraError,
+    "CameraError",
+    Nak { command, status },
+    InvalidOption { option, driver }
+);
 
 pub type Result<T> = std::result::Result<T, CameraError>;
 

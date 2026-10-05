@@ -6,7 +6,7 @@
 //! `Arc` drops. A slow consumer holding frames therefore degrades into pool
 //! underruns at the worker, never blocking it.
 
-use std::time::Instant;
+use crate::clock::Instant;
 
 use crate::gige::proto::gvsp::PixelFormat;
 

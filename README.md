@@ -62,6 +62,59 @@ Underneath sits the GigE Vision backend:
   size is negotiated automatically, and frames fan out as `Arc<Frame>` over
   bounded channels that drop when full.
 
+## Real-time tuning
+
+`GigeConfig` and `StreamConfig` take [fast-talker](https://docs.rs/fast-talker)
+option lists, re-exported as `telegenic::{ThreadOption, SocketOption}`. All
+are empty by default except `StreamConfig::stream_socket`, which requests an
+8 MiB receive buffer so a full frame's burst fits between two worker wakeups.
+
+```rust no_run
+use telegenic::gige::GigeConfig;
+use telegenic::{GenICamera, SocketOption, StreamConfig, ThreadOption};
+
+let mut cfg = GigeConfig::new([10, 0, 0, 210]);
+cfg.thread = vec![ThreadOption::CpuAffinity(vec![2])];
+cfg.control_socket = vec![SocketOption::Dscp(46)];
+let mut cam = GenICamera::with_config(cfg);
+cam.connect()?;
+
+let mut stream = StreamConfig::new();
+stream.thread = vec![ThreadOption::CpuAffinity(vec![3]), ThreadOption::RtPriority(80)];
+stream.stream_socket = vec![SocketOption::RecvBuffer(32 << 20)];
+let acq = cam.start_acquisition(stream)?;
+# drop(acq);
+# Ok::<(), telegenic::GenicamError>(())
+```
+
+| Field | Applied to | Accepted | Refused, and why |
+|---|---|---|---|
+| `GigeConfig::thread` | the GVCP control worker, by itself during `connect` | `CpuAffinity`, `PrefaultStack`, `LinuxNice`, `UnixScheduler(Other \| Batch \| Idle)`, `WinPriority` below `TimeCritical`, `WinDisablePowerThrottling`, `MacOsQos` | `RtPriority`, `UnixScheduler(Fifo \| RoundRobin)`, `WinPriority(TimeCritical)`, `WinMmcss`, `MacOsTimeConstraint`: a real-time class on a thread that blocks on slow request/response round-trips only risks starving the rest of the system |
+| `GigeConfig::control_socket` | the GVCP socket, right after bind | `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority` | the busy-poll options burn a core on a slow loop; `SendBuffer`, `DontFragment` and `WinCpuAffinity` don't help a request/response socket |
+| `StreamConfig::thread` | the GVSP stream worker, by itself before the stream opens | every `ThreadOption` except the one refused | `MacOsTimeConstraint`: it reserves a fixed computation slice per period, and the worker is a receive loop with no host-owned period |
+| `StreamConfig::stream_socket` | the GVSP socket, right after bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send |
+
+A refused option, or one that fails to apply (e.g. `RtPriority` without
+`CAP_SYS_NICE`), makes `connect` (or opening the stream) fail. Options for
+another platform, or that this platform cannot do, are skipped with a
+`tracing` warning, so one config works on Linux, macOS and Windows. Discovery
+and Force IP take no options.
+
+Process-wide settings (memory locking, `cpu_dma_latency`, Windows priority
+class, timer resolution and working set) are the application's job: call
+`telegenic::fast_talker::options::ProcessOption::apply_all` once at startup.
+
+From Python the same lists are keyword arguments, in any shape fast-talker
+accepts:
+
+```python
+cam = telegenic.Camera("10.0.0.210", thread={"cpu_affinity": [2]})
+acq = cam.start_acquisition(
+    thread=[("cpu_affinity", [3]), ("rt_priority", 80)],
+    stream_socket={"recv_buffer": 32 << 20},
+)
+```
+
 ## Python
 
 The same library ships as a Python package via PyO3/maturin (the `py`

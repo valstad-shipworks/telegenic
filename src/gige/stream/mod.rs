@@ -8,11 +8,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_talker::options::{SocketOption, ThreadOption};
 use parking_lot::Mutex;
 
 use crate::gige::ControlPort;
 use crate::gige::proto::bootstrap;
-use crate::thread_util::{ThreadConfig, ThreadHandle};
+use crate::link::LinkCounters;
+use crate::thread_util::ThreadHandle;
 
 pub use frame::{Frame, FrameStatus, PayloadKind};
 
@@ -58,14 +60,31 @@ pub struct StreamConfig {
     pub frame_retention: Duration,
     /// Cap on resend requests per frame, as a fraction of its packet count.
     pub packet_request_ratio: f64,
-    /// SO_RCVBUF for the stream socket; 0 picks `max(256 KiB, 8 * packet
-    /// size)`.
-    pub socket_buffer: usize,
     /// Local address for the stream socket. The IP must be device-reachable;
     /// `None` auto-detects via a connected probe socket.
     pub local_addr: Option<SocketAddr>,
-    pub thread_cfg: ThreadConfig,
+    /// Options the GVSP worker applies to itself before the stream opens;
+    /// one it fails to apply fails the open. Every thread option is
+    /// accepted except `MacOsTimeConstraint`, which reserves a computation
+    /// slice per period and this loop has no host-owned period. Options for
+    /// another platform are skipped with a warning. Process-wide settings
+    /// are the application's to make, with
+    /// [`ProcessOption::apply_all`](fast_talker::options::ProcessOption::apply_all).
+    pub thread: Vec<ThreadOption>,
+    /// Options for the GVSP socket, applied right after bind. Defaults to
+    /// [`DEFAULT_STREAM_RECV_BUFFER`] of receive buffer, so a burst of a
+    /// full frame fits between two worker wakeups. Accepted: `RecvBuffer`,
+    /// `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`,
+    /// `LinuxBusyPollBudget`, `WinCpuAffinity`. Refused: `SendBuffer`,
+    /// `DontFragment`, `Dscp` and `LinuxPriority`, which only shape traffic
+    /// this socket doesn't send.
+    pub stream_socket: Vec<SocketOption>,
 }
+
+/// The receive buffer [`StreamConfig::stream_socket`] requests by default.
+/// Linux caps it at `net.core.rmem_max` unless the process has
+/// `CAP_NET_ADMIN`.
+pub const DEFAULT_STREAM_RECV_BUFFER: usize = 8 * 1024 * 1024;
 
 impl Default for StreamConfig {
     fn default() -> Self {
@@ -86,9 +105,9 @@ impl StreamConfig {
             packet_timeout: Duration::from_millis(20),
             frame_retention: Duration::from_millis(100),
             packet_request_ratio: 0.25,
-            socket_buffer: 0,
             local_addr: None,
-            thread_cfg: ThreadConfig::default(),
+            thread: Vec::new(),
+            stream_socket: vec![SocketOption::RecvBuffer(DEFAULT_STREAM_RECV_BUFFER)],
         }
     }
 
@@ -167,7 +186,6 @@ impl FrameChannel {
         self.rx.is_disconnected()
     }
 
-    #[cfg(feature = "async")]
     pub async fn recv_async(&self) -> Option<Arc<Frame>> {
         self.rx.recv_async().await.ok()
     }
@@ -175,6 +193,7 @@ impl FrameChannel {
 
 pub(crate) struct StreamShared {
     pub stats: Mutex<StreamStats>,
+    pub link: Arc<LinkCounters>,
 }
 
 /// An open stream channel. Owns the receiver worker; dropping the handle

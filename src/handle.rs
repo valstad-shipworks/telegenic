@@ -8,11 +8,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, SystemTime};
 
-use atomic_waker::AtomicWaker;
 use event_listener::{Event, Listener};
+use parking_lot::Mutex;
 
 use crate::error::CameraError;
 
@@ -32,10 +32,10 @@ impl<T> Clone for ResponseHandle<T> {
 
 struct Inner<T> {
     cell: OnceLock<(SystemTime, Response<T>)>,
-    // `event` wakes blocking `wait_timeout` waiters; `waker` wakes the async
-    // `poll` waiter. Both are signalled after `cell` is set.
+    // `event` wakes blocking waiters; `wakers` wakes every task
+    // polling a clone. Both are signalled after `cell` is set.
     event: Event,
-    waker: AtomicWaker,
+    wakers: Mutex<Vec<Waker>>,
 }
 
 impl<T: Clone> ResponseHandle<T> {
@@ -44,16 +44,18 @@ impl<T: Clone> ResponseHandle<T> {
             inner: Arc::new(Inner {
                 cell: OnceLock::new(),
                 event: Event::new(),
-                waker: AtomicWaker::new(),
+                wakers: Mutex::new(Vec::new()),
             }),
         }
     }
 
     /// Worker-side: deposit the outcome. Idempotent (`OnceLock`).
     pub(crate) fn fulfill(&self, value: Response<T>) {
-        let _ = self.inner.cell.set((SystemTime::now(), value));
+        let _ = self.inner.cell.set((crate::clock::system_now(), value));
         self.inner.event.notify(usize::MAX);
-        self.inner.waker.wake();
+        for waker in std::mem::take(&mut *self.inner.wakers.lock()) {
+            waker.wake();
+        }
     }
 
     pub(crate) fn fail(&self, err: CameraError) {
@@ -81,6 +83,9 @@ impl<T: Clone> ResponseHandle<T> {
     }
 
     pub fn wait_timeout(&self, timeout: Duration) -> Response<T> {
+        if self.is_set() {
+            return self.get();
+        }
         // Register the listener before checking, so a fulfill racing between
         // the check and the listen can't be lost.
         let listener = self.inner.event.listen();
@@ -102,9 +107,13 @@ impl<T: Clone> Future for ResponseHandle<T> {
         if self.is_set() {
             return Poll::Ready(self.get());
         }
-        self.inner.waker.register(cx.waker());
-        // Re-check after registering: a fulfill between the check above and the
-        // register would otherwise wake a waker we hadn't stored yet.
+        {
+            let mut wakers = self.inner.wakers.lock();
+            match wakers.iter_mut().find(|w| w.will_wake(cx.waker())) {
+                Some(w) => w.clone_from(cx.waker()),
+                None => wakers.push(cx.waker().clone()),
+            }
+        }
         if self.is_set() {
             Poll::Ready(self.get())
         } else {
@@ -125,14 +134,39 @@ impl<T> std::fmt::Debug for ResponseHandle<T> {
 pub(crate) fn unwrap_arc(e: Arc<CameraError>) -> CameraError {
     match Arc::try_unwrap(e) {
         Ok(err) => err,
-        Err(shared) => CameraError::Spawn(shared.to_string()),
+        Err(shared) => duplicate(&shared),
+    }
+}
+
+fn duplicate(e: &CameraError) -> CameraError {
+    match e {
+        CameraError::Io(io) => CameraError::Io(match io.raw_os_error() {
+            Some(code) => std::io::Error::from_raw_os_error(code),
+            None => std::io::Error::new(io.kind(), io.to_string()),
+        }),
+        CameraError::ConnectTimeout => CameraError::ConnectTimeout,
+        CameraError::Disconnected => CameraError::Disconnected,
+        CameraError::Timeout => CameraError::Timeout,
+        CameraError::ControlDenied => CameraError::ControlDenied,
+        CameraError::ControlLost => CameraError::ControlLost,
+        CameraError::Nak { command, status } => CameraError::Nak {
+            command: *command,
+            status: *status,
+        },
+        CameraError::Protocol(m) => CameraError::Protocol(m.clone()),
+        CameraError::Unsupported(what) => CameraError::Unsupported(what),
+        CameraError::Spawn(m) => CameraError::Spawn(m.clone()),
+        CameraError::InvalidOption { option, driver } => CameraError::InvalidOption {
+            option: option.clone(),
+            driver,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::task::{Wake, Waker};
+    use std::task::Wake;
     use std::time::Instant;
 
     struct ThreadWaker(std::thread::Thread);
@@ -182,5 +216,55 @@ mod tests {
             start.elapsed() < Duration::from_secs(1),
             "async poll did not wake on notify (lost-wakeup regression)"
         );
+    }
+
+    #[test]
+    fn every_clone_awaiting_wakes() {
+        let handle = ResponseHandle::<u32>::new();
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let h = handle.clone();
+                std::thread::spawn(move || block_on(h))
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(50));
+        handle.fulfill(Ok(7));
+        for w in waiters {
+            assert_eq!(w.join().unwrap().unwrap(), 7);
+        }
+    }
+
+    #[test]
+    fn errors_read_through_a_shared_handle_keep_their_variant() {
+        let read = |err: CameraError| {
+            let handle = ResponseHandle::<()>::new();
+            handle.fail(err);
+            handle.wait().map_err(unwrap_arc).unwrap_err()
+        };
+        match read(CameraError::Io(std::io::Error::from_raw_os_error(13))) {
+            CameraError::Io(e) => assert_eq!(e.raw_os_error(), Some(13)),
+            other => panic!("{other:?}"),
+        }
+        match read(CameraError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ))) {
+            CameraError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
+                assert_eq!(e.to_string(), "refused");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            read(CameraError::ControlLost),
+            CameraError::ControlLost
+        ));
+        assert!(matches!(
+            read(CameraError::InvalidOption {
+                option: "RtPriority(50)".into(),
+                driver: "gvsp",
+            }),
+            CameraError::InvalidOption { option, driver: "gvsp" } if option == "RtPriority(50)"
+        ));
     }
 }
