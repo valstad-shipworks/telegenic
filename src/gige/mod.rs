@@ -14,7 +14,7 @@ pub mod proto;
 mod runner;
 pub mod stream;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -31,7 +31,7 @@ use crate::gige::stream::{StreamChannel, StreamConfig, StreamShared};
 use crate::handle::{ResponseHandle, unwrap_arc};
 use crate::link::{LinkCounters, LinkStats as HealthStats};
 use crate::thread_util::ThreadHandle;
-use crate::tuning::{self, OptionReport, SocketRole, TuningReport};
+use crate::tuning::{self, SocketRole, TuningReport};
 use crate::wire::{
     ControlRx, ControlTelemetry, ControlTx, GvcpCmd, GvspPacket, StreamTelemetry, TelemetrySink,
 };
@@ -708,7 +708,7 @@ impl GigECamera {
                 local_addr: bound,
                 tuning: TuningReport {
                     thread: thread_report,
-                    socket: OptionReport::from(&socket_report),
+                    socket: socket_report.summary(),
                 },
             })
         };
@@ -786,18 +786,22 @@ impl GigECamera {
 
 /// The host IP to advertise to the device for a return channel (GVSP stream
 /// or message channel). Prefers the control socket's bound IP — it provably
-/// reaches the device — then a probe socket, whose `connect` a real kernel
-/// resolves to the outbound interface's address. On a host that only has
-/// wildcard binds (e.g. a virtual network shim) both stay unspecified; the
-/// caller then advertises an address of 0 and relies on the device streaming
-/// back to the GVCP requester (see `GigeDevice::stream_dest`).
+/// reaches the device — then fast-talker's `nic::source_for`: the address a
+/// real kernel picks for the outbound route, or where connecting leaves it
+/// unspecified, the host's address on the device's subnet. On a host with
+/// neither (only wildcard binds, e.g. a virtual network shim) the caller
+/// advertises an address of 0 and relies on the device streaming back to
+/// the GVCP requester (see `GigeDevice::stream_dest`).
 fn advertised_host_ip(conn: &Connection) -> Result<IpAddr> {
     if !conn.local_addr.ip().is_unspecified() {
         return Ok(conn.local_addr.ip());
     }
-    let probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    probe.connect(conn.device_addr)?;
-    Ok(probe.local_addr()?.ip())
+    match fast_talker::nic::source_for(conn.device_addr.ip()) {
+        Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            Ok(Ipv4Addr::UNSPECIFIED.into())
+        }
+        found => Ok(found?),
+    }
 }
 
 /// Dial and bootstrap one connection. On any failure the worker is torn

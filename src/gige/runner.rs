@@ -21,7 +21,7 @@ use crate::gige::{GigeConfig, GvcpEvent, Shared};
 use crate::handle::ResponseHandle;
 use crate::rx_timestamp::{self, StampedSocket};
 use crate::thread_util::{ExitGuard, ThreadHandle};
-use crate::tuning::{self, OptionReport, SocketRole, ThreadRole, TuningReport};
+use crate::tuning::{self, SocketRole, ThreadRole, TuningReport};
 use crate::wire::{self, ControlTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -687,7 +687,7 @@ pub(crate) fn spawn(
             let _exit = ExitGuard(thread_for_worker.to_pass_in());
             let _tuning = match tuning::apply_thread(ThreadRole::Control, &cfg.thread) {
                 Ok(report) => {
-                    let _ = started_tx.send(Ok(OptionReport::from(&report)));
+                    let _ = started_tx.send(Ok(report.summary()));
                     report
                 }
                 Err(e) => {
@@ -709,7 +709,7 @@ pub(crate) fn spawn(
         local_addr,
         TuningReport {
             thread: thread_report,
-            socket: OptionReport::from(&socket_report),
+            socket: socket_report.summary(),
         },
     ))
 }

@@ -33,7 +33,7 @@ use telegenic::gige::proto::bootstrap;
 use telegenic::gige::proto::gvcp::{self, GvcpStatus};
 use telegenic::gige::{GigECamera, GigeConfig};
 use telegenic::{
-    CameraError, FrameStatus, GenICamera, OptionReport, PacketSize, SocketOption, StreamConfig,
+    CameraError, FrameStatus, GenICamera, PacketSize, ReportSummary, SocketOption, StreamConfig,
     ThreadOption,
 };
 
@@ -184,7 +184,7 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
     }
 }
 
-fn skipped<O: Clone>(report: &OptionReport<O>) -> Vec<O> {
+fn skipped<O: Clone>(report: &ReportSummary<O>) -> Vec<O> {
     report.skipped.iter().map(|s| s.option.clone()).collect()
 }
 
@@ -223,6 +223,18 @@ fn options_for_another_platform_are_skipped() {
         drop(stream);
         drop(cam);
         device.stop();
+    });
+}
+
+/// With the control socket on a wildcard bind, the stream is advertised
+/// at and bound to the host's address on the camera's subnet.
+#[test]
+fn an_unbound_control_socket_streams_to_the_host_address() {
+    with_eth0(4).run(|| {
+        let _device = Camera::spawn();
+        let cam = connected(config(2));
+        let stream = cam.open_stream(stream_config()).expect("open stream");
+        assert_eq!(stream.local_addr().ip(), IpAddr::V4(HOST_IP));
     });
 }
 

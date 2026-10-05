@@ -55,7 +55,7 @@ pub mod wire;
 
 pub use error::{CameraError, GenicamError, Result};
 pub use fast_talker;
-pub use fast_talker::options::{SocketOption, ThreadOption};
+pub use fast_talker::options::{ReportSummary, SocketOption, ThreadOption};
 pub use genicam::{AccessMode, Acquisition, Features, GenICamera, NodeKind, SnapshotSession};
 pub use gige::PixelFormat;
 pub use gige::stream::{
@@ -64,7 +64,7 @@ pub use gige::stream::{
 };
 pub use handle::ResponseHandle;
 pub use link::LinkStats;
-pub use tuning::{OptionReport, TuningReport};
+pub use tuning::TuningReport;
 pub use wire::{
     ControlRx, ControlTelemetry, ControlTx, GvcpAck, GvcpCmd, GvspPacket, StreamTelemetry,
     TelemetrySink,

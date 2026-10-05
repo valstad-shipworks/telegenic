@@ -4,7 +4,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use fast_talker::options::{Adjusted, Report, Rules, Skipped, SocketOption, ThreadOption};
+use fast_talker::options::{Report, ReportSummary, Rules, SocketOption, ThreadOption};
 use fast_talker::rt::{Scheduler, ThreadPriority};
 use fast_talker::sockets::{self, OpenError};
 
@@ -122,53 +122,9 @@ fn invalid(kind: &str, option: &impl std::fmt::Debug, driver: &'static str) -> C
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuningReport {
     /// The worker thread's options.
-    pub thread: OptionReport<ThreadOption>,
+    pub thread: ReportSummary<ThreadOption>,
     /// The worker socket's options.
-    pub socket: OptionReport<SocketOption>,
-}
-
-/// The lists of a fast-talker [`Report`], without the guards that keep its
-/// settings in force, so it can leave the worker thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OptionReport<O> {
-    /// Options applied, in the order they were applied.
-    pub applied: Vec<O>,
-    /// Applied options whose value the platform changed: a receive buffer
-    /// capped by `net.core.rmem_max`, say.
-    pub adjusted: Vec<Adjusted<O>>,
-    /// Options skipped as meant for another platform or not supported by
-    /// this one.
-    pub skipped: Vec<Skipped<O>>,
-}
-
-impl<O> Default for OptionReport<O> {
-    fn default() -> Self {
-        Self {
-            applied: Vec::new(),
-            adjusted: Vec::new(),
-            skipped: Vec::new(),
-        }
-    }
-}
-
-impl<O: Clone> From<&Report<O>> for OptionReport<O> {
-    fn from(report: &Report<O>) -> Self {
-        Self {
-            applied: report.applied.clone(),
-            adjusted: report.adjusted.clone(),
-            skipped: report.skipped.clone(),
-        }
-    }
-}
-
-impl<O> From<OptionReport<O>> for Report<O> {
-    fn from(lists: OptionReport<O>) -> Self {
-        let mut report = Report::default();
-        report.applied = lists.applied;
-        report.adjusted = lists.adjusted;
-        report.skipped = lists.skipped;
-        report
-    }
+    pub socket: ReportSummary<SocketOption>,
 }
 
 /// Applies `options` to the calling thread. Keep the returned report alive

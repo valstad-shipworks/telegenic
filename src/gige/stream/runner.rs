@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fast_talker::options::ThreadOption;
+use fast_talker::options::{ReportSummary, ThreadOption};
 use flume::{Receiver, TryRecvError};
 use mio::{Events, Interest, Poll, Token, Waker};
 
@@ -20,7 +20,7 @@ use crate::gige::stream::frame::{BufSlot, Frame, FramePool, FrameStatus, Payload
 use crate::gige::stream::{StreamConfig, StreamShared, StreamStats};
 use crate::rx_timestamp::{self, StampedSocket};
 use crate::thread_util::{ExitGuard, ThreadHandle};
-use crate::tuning::{self, OptionReport, ThreadRole};
+use crate::tuning::{self, ThreadRole};
 use crate::wire::{self, StreamTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -990,7 +990,7 @@ pub(crate) fn spawn(
     shared: Arc<StreamShared>,
     cfg: StreamConfig,
     telemetry: Option<StreamTelemetry>,
-) -> Result<(ThreadHandle, OptionReport<ThreadOption>), CameraError> {
+) -> Result<(ThreadHandle, ReportSummary<ThreadOption>), CameraError> {
     let mut socket =
         rx_timestamp::stamped(std_socket, "gvsp").map_err(|e| CameraError::Spawn(e.to_string()))?;
 
@@ -1014,7 +1014,7 @@ pub(crate) fn spawn(
             let _exit = ExitGuard(thread_for_worker.to_pass_in());
             let _tuning = match tuning::apply_thread(ThreadRole::Stream, &cfg.thread) {
                 Ok(report) => {
-                    let _ = started_tx.send(Ok(OptionReport::from(&report)));
+                    let _ = started_tx.send(Ok(report.summary()));
                     report
                 }
                 Err(e) => {

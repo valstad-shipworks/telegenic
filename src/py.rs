@@ -14,7 +14,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fast_talker::options::Report;
 use fast_talker::py::{SocketOptions, ThreadOptions};
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
@@ -1084,8 +1083,8 @@ impl LinkStats {
 /// `{"applied": [...], "adjusted": [...], "skipped": [...]}`.
 fn tuning_dict(py: Python<'_>, report: TuningReport) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("thread", &Report::from(report.thread))?;
-    d.set_item("socket", &Report::from(report.socket))?;
+    d.set_item("thread", report.thread)?;
+    d.set_item("socket", report.socket)?;
     Ok(d)
 }
 
@@ -1119,6 +1118,6 @@ fn telegenic_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DeviceInfo>()?;
 
     m.add_function(wrap_pyfunction!(discover, m)?)?;
-    fast_talker::py::register(m)?;
+    fast_talker::py::register_as(m, "telegenic")?;
     Ok(())
 }

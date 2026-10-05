@@ -377,6 +377,15 @@ class ReportDict(TypedDict, Generic[_OptionDict]):
     adjusted: list[AdjustedDict[_OptionDict]]
     skipped: list[SkippedDict[_OptionDict]]
 
+ThreadReportDict: TypeAlias = ReportDict[ThreadOptionDict]
+"""How a list of thread options was applied."""
+
+ProcessReportDict: TypeAlias = ReportDict[ProcessOptionDict]
+"""How a list of process options was applied."""
+
+SocketReportDict: TypeAlias = ReportDict[SocketOptionDict]
+"""How a list of socket options was applied."""
+
 @final
 class ProcessGuard:
     """Process-wide settings from `apply_process_options`, held until
@@ -413,5 +422,5 @@ def apply_process_options(
 class TuningReportDict(TypedDict):
     """What a worker's thread and socket options came to."""
 
-    thread: ReportDict[ThreadOptionDict]
-    socket: ReportDict[SocketOptionDict]
+    thread: ThreadReportDict
+    socket: SocketReportDict
