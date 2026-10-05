@@ -504,7 +504,14 @@ fn full_frame(stream_socket: Vec<SocketOption>) -> (FrameStatus, u64, u64) {
         let (frame, _) = rig.snap();
         let status = frame.status;
         let overflowed = snare::sockets_bound(rig.stream.local_addr())[0].overflowed;
-        let packets = rig.stream.stats().packets;
+        let stats = rig.stream.stats();
+        let packets = stats.packets;
+        let expected_drops = if cfg!(target_os = "linux") {
+            overflowed
+        } else {
+            0
+        };
+        assert_eq!(stats.socket_drops, expected_drops);
         drop(frame);
         rig.stop();
         (status, overflowed, packets)

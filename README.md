@@ -92,15 +92,22 @@ let acq = cam.start_acquisition(stream)?;
 | Field | Applied to | Accepted | Refused, and why |
 |---|---|---|---|
 | `GigeConfig::thread` | the GVCP control worker, by itself during `connect` | `CpuAffinity`, `PrefaultStack`, `LinuxNice`, `UnixScheduler(Other \| Batch \| Idle)`, `WinPriority` below `TimeCritical`, `WinDisablePowerThrottling`, `MacOsQos` | `RtPriority`, `UnixScheduler(Fifo \| RoundRobin)`, `WinPriority(TimeCritical)`, `WinMmcss`, `MacOsTimeConstraint`: a real-time class on a thread that blocks on slow request/response round-trips only risks starving the rest of the system |
-| `GigeConfig::control_socket` | the GVCP socket, right after bind | `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority` | the busy-poll options burn a core on a slow loop; `SendBuffer`, `DontFragment` and `WinCpuAffinity` don't help a request/response socket |
+| `GigeConfig::control_socket` | the GVCP socket, before bind | `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority` | the busy-poll options burn a core on a slow loop; `SendBuffer`, `DontFragment` and `WinCpuAffinity` don't help a request/response socket |
 | `StreamConfig::thread` | the GVSP stream worker, by itself before the stream opens | every `ThreadOption` except the one refused | `MacOsTimeConstraint`: it reserves a fixed computation slice per period, and the worker is a receive loop with no host-owned period |
-| `StreamConfig::stream_socket` | the GVSP socket, right after bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send; Windows only takes `WinCpuAffinity` before bind |
+| `StreamConfig::stream_socket` | the GVSP socket, before bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send |
 
-A refused option, or one that fails to apply (e.g. `RtPriority` without
-`CAP_SYS_NICE`), makes `connect` (or opening the stream) fail. Options for
-another platform, or that this platform cannot do, are skipped with a
-`tracing` warning, so one config works on Linux, macOS and Windows. Discovery
-and Force IP take no options.
+Socket options are applied before the socket is bound, so `BindDevice`
+and `WinCpuAffinity` take effect. A refused option, or one that fails to
+apply (e.g. `RtPriority` without `CAP_SYS_NICE`), makes `connect` (or
+opening the stream) fail, naming the option. Options for another platform,
+or that this platform cannot do, are skipped with a `tracing` warning, so
+one config works on Linux, macOS and Windows; so is an option the platform
+applied with a different value, such as a `RecvBuffer` capped by
+`net.core.rmem_max`. `GigECamera::tuning_report()` and
+`StreamChannel::tuning_report()` list what was applied, adjusted and
+skipped. On Linux, `StreamStats::socket_drops` counts the datagrams the
+GVSP socket dropped because its receive buffer was full. Discovery and
+Force IP take no options.
 
 Process-wide settings (memory locking, `cpu_dma_latency`, Windows priority
 class, timer resolution and working set) are the application's job: call

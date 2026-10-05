@@ -64,6 +64,7 @@ pub use gige::stream::{
 };
 pub use handle::ResponseHandle;
 pub use link::LinkStats;
+pub use tuning::{OptionReport, TuningReport};
 pub use wire::{
     ControlRx, ControlTelemetry, ControlTx, GvcpAck, GvcpCmd, GvspPacket, StreamTelemetry,
     TelemetrySink,

@@ -31,7 +31,7 @@ use crate::gige::stream::{StreamChannel, StreamConfig, StreamShared};
 use crate::handle::{ResponseHandle, unwrap_arc};
 use crate::link::{LinkCounters, LinkStats as HealthStats};
 use crate::thread_util::ThreadHandle;
-use crate::tuning::{self, SocketRole};
+use crate::tuning::{self, OptionReport, SocketRole, TuningReport};
 use crate::wire::{
     ControlRx, ControlTelemetry, ControlTx, GvcpCmd, GvspPacket, StreamTelemetry, TelemetrySink,
 };
@@ -70,7 +70,7 @@ pub struct GigeConfig {
     /// are the application's to make, with
     /// [`ProcessOption::apply_all`](fast_talker::options::ProcessOption::apply_all).
     pub thread: Vec<ThreadOption>,
-    /// Options for the GVCP socket, applied right after bind. Accepted:
+    /// Options for the GVCP socket, applied before bind. Accepted:
     /// `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority`. Refused: the
     /// busy-poll options (they burn a core on a slow loop), `SendBuffer`,
     /// `DontFragment` and `WinCpuAffinity`.
@@ -331,6 +331,7 @@ struct Connection {
     capabilities: u32,
     genicam_xml: Option<Arc<[u8]>>,
     genicam: Option<crate::genicam::Genicam>,
+    tuning: TuningReport,
 }
 
 /// A GigE Vision device over its GVCP control channel.
@@ -564,6 +565,12 @@ impl GigECamera {
         self.link.snapshot()
     }
 
+    /// What [`GigeConfig::thread`] and [`GigeConfig::control_socket`] came
+    /// to on the current connection, if any.
+    pub fn tuning_report(&self) -> Option<&TuningReport> {
+        self.connection.as_ref().map(|c| &c.tuning)
+    }
+
     /// Open a GVSP stream channel: bind a receive socket, point the device's
     /// SCDA/SCP at it, settle the packet size (negotiating it when
     /// configured `Auto`), and start the reassembly worker.
@@ -611,12 +618,9 @@ impl GigECamera {
             Some(a) => a,
             None => SocketAddr::new(advertised_host_ip(conn)?, 0),
         };
-        let socket = std::net::UdpSocket::bind(local)?;
-        tuning::apply_socket(
-            SocketRole::UdpStreamRx,
-            &socket,
-            &cfg.stream_socket_options(),
-        )?;
+        let (socket, socket_report) =
+            tuning::bind_udp(SocketRole::UdpStreamRx, local, &cfg.stream_socket_options())
+                .map_err(std::io::Error::from)?;
         let bound = socket.local_addr()?;
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));
@@ -678,7 +682,7 @@ impl GigECamera {
             });
             let (to_worker, rx) = flume::unbounded();
             let channel = cfg.channel;
-            let thread = crate::gige::stream::runner::spawn(
+            let (thread, thread_report) = crate::gige::stream::runner::spawn(
                 socket,
                 crate::gige::stream::runner::LinkParams {
                     device_gvcp_addr: conn.device_addr,
@@ -702,6 +706,10 @@ impl GigECamera {
                 channel_base: base,
                 packet_size,
                 local_addr: bound,
+                tuning: TuningReport {
+                    thread: thread_report,
+                    socket: OptionReport::from(&socket_report),
+                },
             })
         };
         open().inspect_err(|_| {
@@ -802,7 +810,7 @@ fn establish(
 ) -> Result<Connection> {
     let shared = Arc::new(Shared::new(link));
     let (to_worker, rx) = flume::unbounded();
-    let (thread, local_addr) = runner::spawn(rx, shared.clone(), cfg.clone(), telemetry)?;
+    let (thread, local_addr, tuning) = runner::spawn(rx, shared.clone(), cfg.clone(), telemetry)?;
     let port = ControlPort {
         to_worker,
         thread: thread.to_pass_in(),
@@ -849,6 +857,7 @@ fn establish(
         capabilities,
         genicam_xml: None,
         genicam: None,
+        tuning,
     })
 }
 

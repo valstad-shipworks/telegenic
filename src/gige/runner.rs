@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_talker::sockets::OpenError;
 use flume::{Receiver, TryRecvError};
-use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token, Waker};
 
 use crate::clock::{self, Instant};
@@ -19,9 +19,9 @@ use crate::gige::proto::bootstrap;
 use crate::gige::proto::gvcp::{self, Ack};
 use crate::gige::{GigeConfig, GvcpEvent, Shared};
 use crate::handle::ResponseHandle;
-use crate::rx_timestamp;
+use crate::rx_timestamp::{self, StampedSocket};
 use crate::thread_util::{ExitGuard, ThreadHandle};
-use crate::tuning::{self, SocketRole, ThreadRole};
+use crate::tuning::{self, OptionReport, SocketRole, ThreadRole, TuningReport};
 use crate::wire::{self, ControlTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -109,7 +109,7 @@ struct Inflight {
 }
 
 pub(crate) struct Runner {
-    socket: UdpSocket,
+    socket: StampedSocket,
     device_addr: SocketAddr,
     rx: Receiver<ToWorker>,
     shared: Arc<Shared>,
@@ -126,9 +126,6 @@ pub(crate) struct Runner {
     heartbeat_due: Instant,
     control_lost: bool,
     telemetry: Option<ControlTelemetry>,
-    /// Whether the control socket carries kernel rx timestamps. When false the
-    /// worker stamps at user-space receive instead.
-    kernel_ts: bool,
 }
 
 /// What to encode when an op reaches the head of the queue.
@@ -141,13 +138,12 @@ enum PendingSend {
 
 impl Runner {
     pub(crate) fn new(
-        socket: UdpSocket,
+        socket: StampedSocket,
         rx: Receiver<ToWorker>,
         shared: Arc<Shared>,
         thread: ThreadHandle,
         cfg: GigeConfig,
         telemetry: Option<ControlTelemetry>,
-        kernel_ts: bool,
     ) -> Self {
         let heartbeat_period = heartbeat_period(&cfg);
         Self {
@@ -166,14 +162,13 @@ impl Runner {
             heartbeat_due: Instant::now() + heartbeat_period,
             control_lost: false,
             telemetry,
-            kernel_ts,
         }
     }
 
     /// Put a datagram on the control socket, reporting it to the sink once the
     /// kernel has taken it. Every outbound byte goes through here.
     fn send_to(&self, datagram: &[u8], dst: SocketAddr, retry: bool) -> std::io::Result<usize> {
-        let sent = self.socket.send_to(datagram, dst)?;
+        let sent = self.socket.send_to(datagram, dst)?.len;
         if let Some(sink) = &self.telemetry
             && let Some(tx) = wire::control_tx(datagram, retry)
         {
@@ -217,25 +212,19 @@ impl Runner {
 
     fn drain_socket(&mut self, buf: &mut [u8]) {
         loop {
-            let read = if self.kernel_ts {
-                rx_timestamp::recv_from_timestamped(&self.socket, buf)
-            } else {
-                self.socket.recv_from(buf).map(|(n, src)| (n, src, None))
-            };
-            match read {
-                Ok((n, src, ts)) => {
+            match self.socket.recv_from(buf) {
+                Ok(r) => {
                     // Events may come from a device source port other than
                     // 3956, so filter on IP only.
-                    if src.ip() != self.device_addr.ip() {
+                    if r.from.ip() != self.device_addr.ip() {
                         continue;
                     }
-                    let at = ts.unwrap_or_else(clock::system_now);
                     if let Some(sink) = &self.telemetry
-                        && let Some(rx) = wire::control_rx(&buf[..n])
+                        && let Some(rx) = wire::control_rx(&buf[..r.len])
                     {
-                        sink.received(&rx, at);
+                        sink.received(&rx, r.timestamp.time);
                     }
-                    self.on_datagram(&buf[..n], src);
+                    self.on_datagram(&buf[..r.len], r.from);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -651,26 +640,33 @@ fn heartbeat_period(cfg: &GigeConfig) -> Duration {
 }
 
 /// Bind the control socket and launch the worker thread. Returns the owner
-/// [`ThreadHandle`] and the socket's local address.
+/// [`ThreadHandle`], the socket's local address, and what the thread and
+/// socket options came to.
 pub(crate) fn spawn(
     rx: Receiver<ToWorker>,
     shared: Arc<Shared>,
     cfg: GigeConfig,
     telemetry: Option<ControlTelemetry>,
-) -> Result<(ThreadHandle, SocketAddr), CameraError> {
+) -> Result<(ThreadHandle, SocketAddr, TuningReport), CameraError> {
     tuning::check_thread(ThreadRole::Control, &cfg.thread)?;
     tuning::check_socket(SocketRole::UdpControl, &cfg.control_socket)?;
     let bind_addr = cfg
         .local_addr
         .unwrap_or_else(|| SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0));
-    let mut socket = UdpSocket::bind(bind_addr)
-        .map_err(|e| CameraError::Spawn(format!("bind control socket {bind_addr}: {e}")))?;
+    let (socket, socket_report) =
+        tuning::bind_udp(SocketRole::UdpControl, bind_addr, &cfg.control_socket).map_err(|e| {
+            match e {
+                OpenError::Io(e) => {
+                    CameraError::Spawn(format!("bind control socket {bind_addr}: {e}"))
+                }
+                e => CameraError::Io(e.into()),
+            }
+        })?;
     let local_addr = socket
         .local_addr()
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
-    tuning::apply_socket(SocketRole::UdpControl, &socket, &cfg.control_socket)?;
-
-    let kernel_ts = rx_timestamp::enable_logged(&socket, "gvcp");
+    let mut socket =
+        rx_timestamp::stamped(socket, "gvcp").map_err(|e| CameraError::Spawn(e.to_string()))?;
 
     let poll = Poll::new().map_err(|e| CameraError::Spawn(e.to_string()))?;
     poll.registry()
@@ -691,7 +687,7 @@ pub(crate) fn spawn(
             let _exit = ExitGuard(thread_for_worker.to_pass_in());
             let _tuning = match tuning::apply_thread(ThreadRole::Control, &cfg.thread) {
                 Ok(report) => {
-                    let _ = started_tx.send(Ok(()));
+                    let _ = started_tx.send(Ok(OptionReport::from(&report)));
                     report
                 }
                 Err(e) => {
@@ -699,24 +695,23 @@ pub(crate) fn spawn(
                     return;
                 }
             };
-            let runner = Runner::new(
-                socket,
-                rx,
-                shared,
-                thread_for_worker,
-                cfg,
-                telemetry,
-                kernel_ts,
-            );
+            let runner = Runner::new(socket, rx, shared, thread_for_worker, cfg, telemetry);
             runner.run(poll);
         })
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
     thread.set_handle(join);
-    started_rx
+    let thread_report = started_rx
         .recv()
         .map_err(|_| CameraError::Spawn("gvcp worker exited during startup".into()))??;
 
-    Ok((thread, local_addr))
+    Ok((
+        thread,
+        local_addr,
+        TuningReport {
+            thread: thread_report,
+            socket: OptionReport::from(&socket_report),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -751,13 +746,14 @@ mod tests {
         fn new() -> Self {
             let device_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             let device = device_socket.local_addr().unwrap();
-            let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let socket = rx_timestamp::stamped(socket, "gvcp").unwrap();
             let mut cfg = GigeConfig::new(device.ip());
             cfg.addr = device;
             let (commands, rx) = flume::unbounded();
             let shared = Arc::new(Shared::new(Arc::new(LinkCounters::default())));
             Self {
-                runner: Runner::new(socket, rx, shared, ThreadHandle::new(), cfg, None, false),
+                runner: Runner::new(socket, rx, shared, ThreadHandle::new(), cfg, None),
                 device,
                 _device_socket: device_socket,
                 _commands: commands,

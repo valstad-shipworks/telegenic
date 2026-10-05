@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_talker::options::ThreadOption;
 use flume::{Receiver, TryRecvError};
-use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token, Waker};
 
 use crate::clock::{self, Instant};
@@ -18,9 +18,9 @@ use crate::gige::proto::gvcp::{self, GvcpStatus};
 use crate::gige::proto::gvsp::{self, ContentType, GvspView, ImageLeader};
 use crate::gige::stream::frame::{BufSlot, Frame, FramePool, FrameStatus, PayloadKind, PooledBuf};
 use crate::gige::stream::{StreamConfig, StreamShared, StreamStats};
-use crate::rx_timestamp;
+use crate::rx_timestamp::{self, StampedSocket};
 use crate::thread_util::{ExitGuard, ThreadHandle};
-use crate::tuning::{self, ThreadRole};
+use crate::tuning::{self, OptionReport, ThreadRole};
 use crate::wire::{self, StreamTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -202,7 +202,7 @@ fn block_id_distance(id: u64, last: u64, extended_ids: bool) -> i64 {
 }
 
 pub(crate) struct StreamRunner {
-    socket: UdpSocket,
+    socket: StampedSocket,
     device_gvcp_addr: SocketAddr,
     rx: Receiver<ToStreamWorker>,
     shared: Arc<StreamShared>,
@@ -224,9 +224,6 @@ pub(crate) struct StreamRunner {
     history: VecDeque<ClosedBlock>,
     tick_frequency: u64,
     telemetry: Option<StreamTelemetry>,
-    /// Whether the stream socket carries kernel rx timestamps. When false the
-    /// worker stamps at user-space receive instead.
-    kernel_ts: bool,
 }
 
 impl StreamRunner {
@@ -293,24 +290,23 @@ impl StreamRunner {
 
     fn drain_socket(&mut self, buf: &mut [u8]) {
         loop {
-            let read = if self.kernel_ts {
-                rx_timestamp::recv_from_timestamped(&self.socket, buf)
-            } else {
-                self.socket.recv_from(buf).map(|(n, src)| (n, src, None))
-            };
-            match read {
-                Ok((n, src, ts)) => {
-                    if src.ip() != self.device_gvcp_addr.ip() {
+            match self.socket.recv_from(buf) {
+                Ok(r) => {
+                    if let Some(drops) = r.drops {
+                        self.stats.socket_drops = u64::from(drops);
+                    }
+                    if r.from.ip() != self.device_gvcp_addr.ip() {
                         continue;
                     }
+                    let datagram = &buf[..r.len];
                     self.stats.packets += 1;
-                    self.stats.bytes += n as u64;
+                    self.stats.bytes += r.len as u64;
                     if let Some(sink) = &self.telemetry
-                        && let Some(rx) = wire::stream_rx(&buf[..n])
+                        && let Some(rx) = wire::stream_rx(datagram)
                     {
-                        sink.received(&rx, ts.unwrap_or_else(clock::system_now));
+                        sink.received(&rx, r.timestamp.time);
                     }
-                    self.process_packet(&buf[..n], Instant::now());
+                    self.process_packet(datagram, Instant::now());
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -985,7 +981,8 @@ pub(crate) struct LinkParams {
 }
 
 /// Take a prepared (bound, buffer-sized, negotiated) std socket and launch
-/// the stream worker thread.
+/// the stream worker thread. Returns the owner [`ThreadHandle`] and what the
+/// thread options came to.
 pub(crate) fn spawn(
     std_socket: std::net::UdpSocket,
     link: LinkParams,
@@ -993,12 +990,9 @@ pub(crate) fn spawn(
     shared: Arc<StreamShared>,
     cfg: StreamConfig,
     telemetry: Option<StreamTelemetry>,
-) -> Result<ThreadHandle, CameraError> {
-    std_socket
-        .set_nonblocking(true)
-        .map_err(|e| CameraError::Spawn(e.to_string()))?;
-    let kernel_ts = rx_timestamp::enable_logged(&std_socket, "gvsp");
-    let mut socket = UdpSocket::from_std(std_socket);
+) -> Result<(ThreadHandle, OptionReport<ThreadOption>), CameraError> {
+    let mut socket =
+        rx_timestamp::stamped(std_socket, "gvsp").map_err(|e| CameraError::Spawn(e.to_string()))?;
 
     let poll = Poll::new().map_err(|e| CameraError::Spawn(e.to_string()))?;
     poll.registry()
@@ -1020,7 +1014,7 @@ pub(crate) fn spawn(
             let _exit = ExitGuard(thread_for_worker.to_pass_in());
             let _tuning = match tuning::apply_thread(ThreadRole::Stream, &cfg.thread) {
                 Ok(report) => {
-                    let _ = started_tx.send(Ok(()));
+                    let _ = started_tx.send(Ok(OptionReport::from(&report)));
                     report
                 }
                 Err(e) => {
@@ -1049,18 +1043,17 @@ pub(crate) fn spawn(
                 history: VecDeque::with_capacity(HISTORY_LEN),
                 tick_frequency: link.tick_frequency,
                 telemetry,
-                kernel_ts,
                 cfg,
             };
             runner.run(poll);
         })
         .map_err(|e| CameraError::Spawn(e.to_string()))?;
     thread.set_handle(join);
-    started_rx
+    let report = started_rx
         .recv()
         .map_err(|_| CameraError::Spawn("gvsp worker exited during startup".into()))??;
 
-    Ok(thread)
+    Ok((thread, report))
 }
 
 #[cfg(test)]
@@ -1117,7 +1110,8 @@ mod tests {
         fn new(payload_size: usize, resend: bool, tick_frequency: u64) -> Self {
             let device = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             device.set_nonblocking(true).unwrap();
-            let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let socket = rx_timestamp::stamped(socket, "gvsp").unwrap();
             let (commands, rx) = flume::unbounded();
             let (tx, delivered) = flume::unbounded();
             let mut cfg = StreamConfig::new();
@@ -1146,7 +1140,6 @@ mod tests {
                 history: VecDeque::new(),
                 tick_frequency,
                 telemetry: None,
-                kernel_ts: false,
                 cfg,
             };
             Self {

@@ -33,7 +33,8 @@ use telegenic::gige::proto::bootstrap;
 use telegenic::gige::proto::gvcp::{self, GvcpStatus};
 use telegenic::gige::{GigECamera, GigeConfig};
 use telegenic::{
-    CameraError, FrameStatus, GenICamera, PacketSize, SocketOption, StreamConfig, ThreadOption,
+    CameraError, FrameStatus, GenICamera, OptionReport, PacketSize, SocketOption, StreamConfig,
+    ThreadOption,
 };
 
 const PROBE_REG: u32 = 0x2020;
@@ -134,10 +135,6 @@ fn refused_options_fail_before_any_traffic() {
                 ..stream_config()
             },
             StreamConfig {
-                stream_socket: vec![SocketOption::WinCpuAffinity(0)],
-                ..stream_config()
-            },
-            StreamConfig {
                 thread: vec![ThreadOption::MacOsTimeConstraint {
                     period_us: 1000,
                     computation_us: 100,
@@ -170,7 +167,7 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
                 ThreadOption::WinDisablePowerThrottling,
             ],
             vec![],
-            vec![],
+            vec![SocketOption::WinCpuAffinity(1)],
         )
     } else {
         (
@@ -179,9 +176,16 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
                 ThreadOption::WinDisablePowerThrottling,
             ],
             vec![SocketOption::LinuxPriority(4)],
-            vec![SocketOption::LinuxBusyPoll(50)],
+            vec![
+                SocketOption::LinuxBusyPoll(50),
+                SocketOption::WinCpuAffinity(1),
+            ],
         )
     }
+}
+
+fn skipped<O: Clone>(report: &OptionReport<O>) -> Vec<O> {
+    report.skipped.iter().map(|s| s.option.clone()).collect()
 }
 
 /// Options meant for another platform are skipped: the link comes up and
@@ -193,13 +197,24 @@ fn options_for_another_platform_are_skipped() {
         let (thread, control_socket, stream_socket) = foreign_options();
         let cam = connected(GigeConfig {
             thread: thread.clone(),
-            control_socket,
+            control_socket: control_socket.clone(),
             ..config(2)
         });
         let mut s = stream_config();
-        s.thread = thread;
-        s.stream_socket.extend(stream_socket);
+        s.thread = thread.clone();
+        s.stream_socket.extend(stream_socket.clone());
         let stream = cam.open_stream(s).expect("open stream");
+        let control = cam.tuning_report().expect("connected");
+        assert_eq!(skipped(&control.thread), thread);
+        assert_eq!(skipped(&control.socket), control_socket);
+        assert_eq!(skipped(&stream.tuning_report().thread), thread);
+        assert_eq!(skipped(&stream.tuning_report().socket), stream_socket);
+        assert_eq!(
+            stream.tuning_report().socket.applied,
+            [SocketOption::RecvBuffer(
+                telegenic::gige::stream::DEFAULT_STREAM_RECV_BUFFER
+            )]
+        );
         let frames = stream.subscribe(1);
         cam.write_register(ACQ_REG, 1).unwrap().wait().unwrap();
         let frame = frames.wait_for(Duration::from_secs(1)).expect("frame");
@@ -257,7 +272,7 @@ fn accepted_socket_options_land_on_the_sockets() {
 }
 
 /// Binding to an interface the host does not have fails `connect` with the
-/// OS error before any traffic, and closes the socket it bound.
+/// OS error before any traffic, and closes the socket before binding it.
 #[test]
 fn an_unknown_bind_device_fails_connect_cleanly() {
     with_eth0(4).run(|| {
@@ -274,8 +289,9 @@ fn an_unknown_bind_device_fails_connect_cleanly() {
         assert!(
             snare::closed_sockets()
                 .iter()
-                .any(|s| s.local == Some(control_addr()))
+                .any(|s| s.kind == SocketKind::Udp && s.local.is_none())
         );
+        assert!(host_udp_sockets().is_empty());
         cam.config_mut().control_socket.clear();
         cam.connect().expect("connect without the bad option");
         drop(cam);

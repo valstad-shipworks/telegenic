@@ -286,16 +286,25 @@ def test_invalid_stream_options_are_rejected(method, param, value, exc, names):
 # error must carry: the converted option, so the shape demonstrably
 # decoded to it.
 REFUSED_CONTROL = [
-    ({"thread": ("rt_priority", 80)}, "RtPriority(80)"),
-    ({"thread": Opt("rt_priority", 7)}, "RtPriority(7)"),
-    ({"thread": {"unix_scheduler": ("fifo", 10)}}, "UnixScheduler(Fifo(10))"),
+    ({"thread": ("rt_priority", 80)}, "rt_priority (RtPriority(80))"),
+    ({"thread": Opt("rt_priority", 7)}, "rt_priority (RtPriority(7))"),
+    (
+        {"thread": {"unix_scheduler": ("fifo", 10)}},
+        "unix_scheduler (UnixScheduler(Fifo(10)))",
+    ),
     (
         {"thread": types.SimpleNamespace(kind="win_mmcss", value="Pro Audio")},
-        'WinMmcss("Pro Audio")',
+        'win_mmcss (WinMmcss("Pro Audio"))',
     ),
-    ({"control_socket": ("send_buffer", 4096)}, "SendBuffer(4096)"),
-    ({"control_socket": {"linux_busy_poll": 50}}, "LinuxBusyPoll(50)"),
-    ({"control_socket": ("dont_fragment", True)}, "DontFragment(true)"),
+    ({"control_socket": ("send_buffer", 4096)}, "send_buffer (SendBuffer(4096))"),
+    (
+        {"control_socket": {"linux_busy_poll": 50}},
+        "linux_busy_poll (LinuxBusyPoll(50))",
+    ),
+    (
+        {"control_socket": ("dont_fragment", True)},
+        "dont_fragment (DontFragment(true))",
+    ),
 ]
 
 

@@ -2,9 +2,11 @@
 //! applying them.
 
 use std::io;
+use std::net::{SocketAddr, UdpSocket};
 
-use fast_talker::options::{Policy, Report, Rules, SocketOption, ThreadOption};
+use fast_talker::options::{Adjusted, Report, Rules, Skipped, SocketOption, ThreadOption};
 use fast_talker::rt::{Scheduler, ThreadPriority};
+use fast_talker::sockets::{self, OpenError};
 
 use crate::error::CameraError;
 
@@ -81,6 +83,7 @@ pub(crate) fn socket_allowed(role: SocketRole, o: &SocketOption) -> bool {
                 | SocketOption::LinuxBusyPoll(_)
                 | SocketOption::LinuxPreferBusyPoll(_)
                 | SocketOption::LinuxBusyPollBudget(_)
+                | SocketOption::WinCpuAffinity(_)
         ),
         SocketRole::UdpControl => matches!(
             o,
@@ -93,22 +96,78 @@ pub(crate) fn socket_allowed(role: SocketRole, o: &SocketOption) -> bool {
 }
 
 pub(crate) fn check_thread(role: ThreadRole, options: &[ThreadOption]) -> Result<(), CameraError> {
-    match options.iter().find(|o| !thread_allowed(role, o)) {
-        Some(o) => Err(CameraError::InvalidOption {
-            option: format!("{o:?}"),
-            driver: role.driver(),
-        }),
+    let allow = |o: &ThreadOption| thread_allowed(role, o);
+    match Rules::portable(&allow).first_rejected(options) {
+        Some(o) => Err(invalid(o.kind_name(), o, role.driver())),
         None => Ok(()),
     }
 }
 
 pub(crate) fn check_socket(role: SocketRole, options: &[SocketOption]) -> Result<(), CameraError> {
-    match options.iter().find(|o| !socket_allowed(role, o)) {
-        Some(o) => Err(CameraError::InvalidOption {
-            option: format!("{o:?}"),
-            driver: role.driver(),
-        }),
+    let allow = |o: &SocketOption| socket_allowed(role, o);
+    match Rules::portable(&allow).first_rejected(options) {
+        Some(o) => Err(invalid(o.kind_name(), o, role.driver())),
         None => Ok(()),
+    }
+}
+
+fn invalid(kind: &str, option: &impl std::fmt::Debug, driver: &'static str) -> CameraError {
+    CameraError::InvalidOption {
+        option: format!("{kind} ({option:?})"),
+        driver,
+    }
+}
+
+/// What a worker's thread and socket options came to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TuningReport {
+    /// The worker thread's options.
+    pub thread: OptionReport<ThreadOption>,
+    /// The worker socket's options.
+    pub socket: OptionReport<SocketOption>,
+}
+
+/// The lists of a fast-talker [`Report`], without the guards that keep its
+/// settings in force, so it can leave the worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionReport<O> {
+    /// Options applied, in the order they were applied.
+    pub applied: Vec<O>,
+    /// Applied options whose value the platform changed: a receive buffer
+    /// capped by `net.core.rmem_max`, say.
+    pub adjusted: Vec<Adjusted<O>>,
+    /// Options skipped as meant for another platform or not supported by
+    /// this one.
+    pub skipped: Vec<Skipped<O>>,
+}
+
+impl<O> Default for OptionReport<O> {
+    fn default() -> Self {
+        Self {
+            applied: Vec::new(),
+            adjusted: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+}
+
+impl<O: Clone> From<&Report<O>> for OptionReport<O> {
+    fn from(report: &Report<O>) -> Self {
+        Self {
+            applied: report.applied.clone(),
+            adjusted: report.adjusted.clone(),
+            skipped: report.skipped.clone(),
+        }
+    }
+}
+
+impl<O> From<OptionReport<O>> for Report<O> {
+    fn from(lists: OptionReport<O>) -> Self {
+        let mut report = Report::default();
+        report.applied = lists.applied;
+        report.adjusted = lists.adjusted;
+        report.skipped = lists.skipped;
+        report
     }
 }
 
@@ -119,64 +178,38 @@ pub(crate) fn apply_thread(
     options: &[ThreadOption],
 ) -> io::Result<Report<ThreadOption>> {
     let allow = |o: &ThreadOption| thread_allowed(role, o);
-    let rules = Rules {
-        other_platform: Policy::Report,
-        unsupported: Policy::Report,
-        rejected: Policy::Error,
-        allow: Some(&allow),
-    };
-    let report = ThreadOption::apply_all(options, &rules)?;
-    for s in &report.skipped {
+    let report = ThreadOption::apply_all(options, &Rules::portable(&allow))?;
+    log(role.driver(), "thread", &report);
+    Ok(report)
+}
+
+/// Creates a UDP socket, applies `options` to it, and binds it to `addr`, so
+/// the options that only take effect before bind do.
+pub(crate) fn bind_udp(
+    role: SocketRole,
+    addr: SocketAddr,
+    options: &[SocketOption],
+) -> Result<(UdpSocket, Report<SocketOption>), OpenError> {
+    let allow = |o: &SocketOption| socket_allowed(role, o);
+    let (socket, report) = sockets::bind_udp(addr, options, &Rules::portable(&allow))?;
+    log(role.driver(), "socket", &report);
+    Ok((socket, report))
+}
+
+fn log<O: std::fmt::Debug>(driver: &str, what: &str, report: &Report<O>) {
+    for a in &report.adjusted {
         tracing::warn!(
-            option = ?s.option,
-            reason = %s.reason,
-            "{} thread option skipped",
-            role.driver()
+            option = ?a.option,
+            effective = ?a.effective,
+            reason = %a.reason,
+            "{driver} {what} option adjusted"
         );
     }
-    Ok(report)
-}
-
-#[cfg(unix)]
-pub(crate) fn apply_socket(
-    role: SocketRole,
-    socket: &impl std::os::fd::AsFd,
-    options: &[SocketOption],
-) -> io::Result<Report<SocketOption>> {
-    let allow = |o: &SocketOption| socket_allowed(role, o);
-    let report = SocketOption::apply_all(socket, options, &socket_rules(&allow))?;
-    log_skipped_sockets(role, &report);
-    Ok(report)
-}
-
-#[cfg(windows)]
-pub(crate) fn apply_socket(
-    role: SocketRole,
-    socket: &impl std::os::windows::io::AsSocket,
-    options: &[SocketOption],
-) -> io::Result<Report<SocketOption>> {
-    let allow = |o: &SocketOption| socket_allowed(role, o);
-    let report = SocketOption::apply_all(socket, options, &socket_rules(&allow))?;
-    log_skipped_sockets(role, &report);
-    Ok(report)
-}
-
-fn socket_rules<'a>(allow: &'a dyn Fn(&SocketOption) -> bool) -> Rules<'a, SocketOption> {
-    Rules {
-        other_platform: Policy::Report,
-        unsupported: Policy::Report,
-        rejected: Policy::Error,
-        allow: Some(allow),
-    }
-}
-
-fn log_skipped_sockets(role: SocketRole, report: &Report<SocketOption>) {
     for s in &report.skipped {
         tracing::warn!(
             option = ?s.option,
             reason = %s.reason,
-            "{} socket option skipped",
-            role.driver()
+            "{driver} {what} option skipped"
         );
     }
 }
@@ -238,7 +271,7 @@ mod tests {
             SocketRole::UdpStreamRx,
             &SocketOption::Dscp(46)
         ));
-        assert!(!socket_allowed(
+        assert!(socket_allowed(
             SocketRole::UdpStreamRx,
             &SocketOption::WinCpuAffinity(0)
         ));
@@ -253,7 +286,7 @@ mod tests {
         let err = check_socket(SocketRole::UdpStreamRx, &[SocketOption::SendBuffer(1)]);
         assert!(matches!(
             err,
-            Err(CameraError::InvalidOption { driver: "gvsp", .. })
+            Err(CameraError::InvalidOption { driver: "gvsp", option }) if option == "send_buffer (SendBuffer(1))"
         ));
     }
 }

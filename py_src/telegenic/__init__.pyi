@@ -135,8 +135,8 @@ class Camera:
             Options for another platform, or that this one cannot do, are
             skipped with a warning. Process-wide settings are the
             application's to make.
-        :param control_socket: Options for the GVCP socket, applied right
-            after bind: ``recv_buffer``, ``bind_device``, ``dscp``,
+        :param control_socket: Options for the GVCP socket, applied before
+            bind: ``recv_buffer``, ``bind_device``, ``dscp``,
             ``linux_priority``. The busy-poll options, ``send_buffer``,
             ``dont_fragment`` and ``win_cpu_affinity`` are refused.
         :raises ValueError: if an IP string does not parse.
@@ -226,13 +226,12 @@ class Camera:
             stream opens. Every thread option except
             ``macos_time_constraint`` is accepted. Options for another
             platform, or that this one cannot do, are skipped with a warning.
-        :param stream_socket: Options for the GVSP socket, applied right
-            after bind, after a default 8 MiB ``recv_buffer`` that a
+        :param stream_socket: Options for the GVSP socket, applied before
+            bind, after a default 8 MiB ``recv_buffer`` that a
             ``recv_buffer`` here replaces. Accepted: ``recv_buffer``,
-            ``bind_device`` and the ``linux_busy_poll`` trio.
-            ``send_buffer``, ``dont_fragment``, ``dscp``,
-            ``linux_priority`` and ``win_cpu_affinity`` (Windows only takes
-            it before bind) are refused.
+            ``bind_device``, the ``linux_busy_poll`` trio and
+            ``win_cpu_affinity``. ``send_buffer``, ``dont_fragment``,
+            ``dscp`` and ``linux_priority`` are refused.
         :raises ValueError: while another acquisition or snapshot session
             is active.
         """
@@ -445,6 +444,9 @@ class StreamStats:
     frames_dropped: int
     """Completed frames a subscriber could not take (its channel was
     full)."""
+    socket_drops: int
+    """Datagrams the stream socket dropped because its receive buffer was
+    full. Linux only; 0 elsewhere."""
 
 @final
 class LinkStats:

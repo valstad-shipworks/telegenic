@@ -15,6 +15,7 @@ use crate::gige::ControlPort;
 use crate::gige::proto::bootstrap;
 use crate::link::LinkCounters;
 use crate::thread_util::ThreadHandle;
+use crate::tuning::TuningReport;
 
 pub use frame::{Frame, FrameStatus, PayloadKind};
 
@@ -71,14 +72,13 @@ pub struct StreamConfig {
     /// are the application's to make, with
     /// [`ProcessOption::apply_all`](fast_talker::options::ProcessOption::apply_all).
     pub thread: Vec<ThreadOption>,
-    /// Options for the GVSP socket, applied right after bind, after a
+    /// Options for the GVSP socket, applied before bind, after a
     /// [`DEFAULT_STREAM_RECV_BUFFER`] receive buffer so a burst of a full
     /// frame fits between two worker wakeups. A `RecvBuffer` here replaces
     /// that default. Accepted: `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`,
-    /// `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`. Refused: `SendBuffer`,
-    /// `DontFragment`, `Dscp` and `LinuxPriority`, which only shape traffic
-    /// this socket doesn't send, and `WinCpuAffinity`, which Windows only
-    /// takes before bind.
+    /// `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity`.
+    /// Refused: `SendBuffer`, `DontFragment`, `Dscp` and `LinuxPriority`,
+    /// which only shape traffic this socket doesn't send.
     pub stream_socket: Vec<SocketOption>,
 }
 
@@ -158,6 +158,10 @@ pub struct StreamStats {
     pub size_mismatch_errors: u64,
     /// Completed frames a subscriber could not take (its channel was full).
     pub frames_dropped: u64,
+    /// Datagrams the stream socket dropped because its receive buffer was
+    /// full, since it opened (`SO_RXQ_OVFL`). Linux only; 0 elsewhere.
+    /// Raise `RecvBuffer` in [`StreamConfig::stream_socket`] if it grows.
+    pub socket_drops: u64,
 }
 
 /// A clone-able receiver for completed frames. Each subscription has its own
@@ -224,6 +228,7 @@ pub struct StreamChannel {
     pub(crate) channel_base: u32,
     pub(crate) packet_size: u16,
     pub(crate) local_addr: SocketAddr,
+    pub(crate) tuning: TuningReport,
 }
 
 impl std::fmt::Debug for StreamChannel {
@@ -256,6 +261,12 @@ impl StreamChannel {
     /// Where the device sends this stream (SCDA:SCP).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// What [`StreamConfig::thread`] and [`StreamConfig::stream_socket`]
+    /// came to.
+    pub fn tuning_report(&self) -> &TuningReport {
+        &self.tuning
     }
 
     pub fn is_running(&self) -> bool {
