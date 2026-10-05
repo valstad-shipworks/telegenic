@@ -28,6 +28,7 @@ pub fn extract_first_file(zip: &[u8]) -> Result<Vec<u8>, String> {
         return Err("bad central directory".into());
     }
     let method = u16_at(zip, entry + 10)?;
+    let crc = u32_at(zip, entry + 16)?;
     let compressed_size = u32_at(zip, entry + 20)? as usize;
     let uncompressed_size = u32_at(zip, entry + 24)? as usize;
     let local_offset = u32_at(zip, entry + 42)? as usize;
@@ -46,12 +47,22 @@ pub fn extract_first_file(zip: &[u8]) -> Result<Vec<u8>, String> {
         .get(data_start..data_start + compressed_size)
         .ok_or("truncated archive data")?;
 
-    match method {
-        METHOD_STORED => Ok(data.to_vec()),
+    let out = match method {
+        METHOD_STORED => data.to_vec(),
         METHOD_DEFLATE => decompress_to_vec_with_limit(data, MAX_UNCOMPRESSED)
-            .map_err(|e| format!("deflate: {e:?}")),
-        other => Err(format!("unsupported compression method {other}")),
+            .map_err(|e| format!("deflate: {e:?}"))?,
+        other => return Err(format!("unsupported compression method {other}")),
+    };
+    if out.len() != uncompressed_size {
+        return Err(format!(
+            "archive entry is {} bytes, directory says {uncompressed_size}",
+            out.len()
+        ));
     }
+    if crc32(&out) != crc {
+        return Err("archive entry fails its CRC-32".into());
+    }
+    Ok(out)
 }
 
 fn find_eocd(zip: &[u8]) -> Option<usize> {
@@ -127,8 +138,8 @@ pub(crate) fn build_zip(filename: &str, content: &[u8], deflate: bool) -> Vec<u8
     zip
 }
 
-#[cfg(test)]
-fn crc32(data: &[u8]) -> u32 {
+/// The PKZIP (IEEE 802.3) CRC-32.
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in data {
         crc ^= u32::from(byte);

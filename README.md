@@ -62,11 +62,85 @@ Underneath sits the GigE Vision backend:
   size is negotiated automatically, and frames fan out as `Arc<Frame>` over
   bounded channels that drop when full.
 
+## Real-time tuning
+
+`GigeConfig` and `StreamConfig` take [fast-talker](https://docs.rs/fast-talker)
+option lists, re-exported as `telegenic::{ThreadOption, SocketOption}`, all
+empty by default. The GVSP socket always gets an 8 MiB receive buffer, so a
+full frame's burst fits between two worker wakeups, unless
+`StreamConfig::stream_socket` sets its own `RecvBuffer`; its other options
+are applied on top of that default rather than replacing it.
+
+```rust no_run
+use telegenic::gige::GigeConfig;
+use telegenic::{GenICamera, SocketOption, StreamConfig, ThreadOption};
+
+let mut cfg = GigeConfig::new([10, 0, 0, 210]);
+cfg.thread = vec![ThreadOption::CpuAffinity(vec![2])];
+cfg.control_socket = vec![SocketOption::Dscp(46)];
+let mut cam = GenICamera::with_config(cfg);
+cam.connect()?;
+
+let mut stream = StreamConfig::new();
+stream.thread = vec![ThreadOption::CpuAffinity(vec![3]), ThreadOption::RtPriority(80)];
+stream.stream_socket = vec![SocketOption::RecvBuffer(32 << 20)];
+let acq = cam.start_acquisition(stream)?;
+# drop(acq);
+# Ok::<(), telegenic::GenicamError>(())
+```
+
+| Field | Applied to | Accepted | Refused, and why |
+|---|---|---|---|
+| `GigeConfig::thread` | the GVCP control worker, by itself during `connect` | `CpuAffinity`, `PrefaultStack`, `LinuxNice`, `UnixScheduler(Other \| Batch \| Idle)`, `WinPriority` below `TimeCritical`, `WinDisablePowerThrottling`, `MacOsQos` | `RtPriority`, `UnixScheduler(Fifo \| RoundRobin)`, `WinPriority(TimeCritical)`, `WinMmcss`, `MacOsTimeConstraint`: a real-time class on a thread that blocks on slow request/response round-trips only risks starving the rest of the system |
+| `GigeConfig::control_socket` | the GVCP socket, before bind | `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority` | the busy-poll options burn a core on a slow loop; `SendBuffer`, `DontFragment` and `WinCpuAffinity` don't help a request/response socket |
+| `StreamConfig::thread` | the GVSP stream worker, by itself before the stream opens | every `ThreadOption` except the one refused | `MacOsTimeConstraint`: it reserves a fixed computation slice per period, and the worker is a receive loop with no host-owned period |
+| `StreamConfig::stream_socket` | the GVSP socket, before bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send |
+
+Socket options are applied before the socket is bound, so `BindDevice`
+and `WinCpuAffinity` take effect. A refused option, or one that fails to
+apply (e.g. `RtPriority` without `CAP_SYS_NICE`), makes `connect` (or
+opening the stream) fail, naming the option. Options for another platform,
+or that this platform cannot do, are skipped with a `tracing` warning, so
+one config works on Linux, macOS and Windows; so is an option the platform
+applied with a different value, such as a `RecvBuffer` capped by
+`net.core.rmem_max`. `GigECamera::tuning_report()` and
+`StreamChannel::tuning_report()` list what was applied, adjusted and
+skipped. On Linux, `StreamStats::socket_drops` counts the datagrams the
+GVSP socket dropped because its receive buffer was full. Discovery and
+Force IP take no options.
+
+Process-wide settings (memory locking, `cpu_dma_latency`, Windows priority
+class, timer resolution and working set) are the application's job: call
+`telegenic::fast_talker::options::ProcessOption::apply_all` once at startup.
+
+From Python the same lists are keyword arguments, in any shape fast-talker
+accepts:
+
+```python
+cam = telegenic.Camera("10.0.0.210", thread={"cpu_affinity": [2]})
+acq = cam.start_acquisition(
+    thread=[("cpu_affinity", [3]), ("rt_priority", 80)],
+    stream_socket={"recv_buffer": 32 << 20},
+)
+print(acq.tuning_report()["socket"]["adjusted"])
+```
+
+`telegenic.apply_process_options` applies the process-wide ones and returns
+a guard that holds them:
+
+```python
+with telegenic.apply_process_options(
+    ["lock_memory", ("linux_cpu_dma_latency", 0)]
+) as guard:
+    print(guard.applied, guard.skipped)
+    ...
+```
+
 ## Python
 
 The same library ships as a Python package via PyO3/maturin (the `py`
-feature). Install with `pip install telegenicam` once it's published, or run
-`maturin develop` from a checkout; the import name is `telegenic` either
+feature). Install with `pip install telegenicam`, or run `maturin develop`
+from a checkout; the import name is `telegenic` either
 way. The GenICam surface maps one-to-one, blocking calls release the GIL,
 and frames expose their pixels as `bytes` for `numpy.frombuffer`:
 
@@ -77,11 +151,11 @@ cam = telegenic.Camera("10.0.0.210")
 cam.connect()
 cam.set_float("ExposureTime", 5000.0)
 
-with cam.snapshot_session() as session:   # camera idle between snaps
+with cam.snapshot_session() as session:  # camera idle between snaps
     frame = session.snap(timeout=5.0)
     print(frame.width, frame.height, frame.pixel_format)
 
-with cam.start_acquisition() as acq:   # stops the camera again on exit
+with cam.start_acquisition() as acq:  # stops the camera again on exit
     for _ in range(100):
         frame = acq.wait_for(timeout=1.0)
         if frame is not None:

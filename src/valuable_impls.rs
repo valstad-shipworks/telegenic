@@ -1,6 +1,7 @@
 //! `valuable::Valuable` impls for types whose fields aren't themselves
 //! `Valuable`: `Ipv4Addr`/`SocketAddr` render as their string form, `Duration`
-//! as whole milliseconds under an `_ms`-suffixed field name.
+//! as whole milliseconds under an `_ms`-suffixed field name, and option lists
+//! as their `Debug` form.
 
 use crate::gige::GigeConfig;
 use crate::gige::discovery::{DiscoveredDevice, DiscoveryConfig, ForceIpConfig, NetworkAdapter};
@@ -15,12 +16,14 @@ macro_rules! valuable_struct {
         $local.as_deref().map_or(valuable::Value::Unit, valuable::Value::String)
     };
     (@val $local:ident dur_ms)   => { valuable::Value::U64($local) };
+    (@val $local:ident debug)    => { valuable::Value::String(&$local) };
 
     (@bind plain    $src:expr) => { &$src };
     (@bind ip       $src:expr) => { $src.to_string() };
     (@bind addr     $src:expr) => { $src.to_string() };
     (@bind opt_addr $src:expr) => { $src.map(|a| a.to_string()) };
     (@bind dur_ms   $src:expr) => { $src.as_millis() as u64 };
+    (@bind debug    $src:expr) => { format!("{:?}", $src) };
 
     (@fname $field:ident dur_ms) => { concat!(stringify!($field), "_ms") };
     (@fname $field:ident $k:ident) => { stringify!($field) };
@@ -99,7 +102,8 @@ valuable_struct!(GigeConfig, "GigeConfig" {
     heartbeat_timeout_ms: plain,
     exclusive: plain,
     event_capacity: plain,
-    thread_cfg: plain,
+    thread: debug,
+    control_socket: debug,
 });
 
 valuable_struct!(StreamConfig, "StreamConfig" {
@@ -113,7 +117,7 @@ valuable_struct!(StreamConfig, "StreamConfig" {
     packet_timeout: dur_ms,
     frame_retention: dur_ms,
     packet_request_ratio: plain,
-    socket_buffer: plain,
     local_addr: opt_addr,
-    thread_cfg: plain,
+    thread: debug,
+    stream_socket: debug,
 });

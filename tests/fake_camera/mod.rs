@@ -1,7 +1,8 @@
 //! An in-process fake GigE Vision device for integration tests: a
-//! register/memory map served over a loopback UDP socket (with knobs for packet loss, pending-ack delays and control
+//! register/memory map served over a loopback UDP socket (with knobs for packet loss and control
 //! denial), plus a GVSP side that answers fire-test packets, sends synthetic
-//! frames, and replays cached packets on resend requests.
+//! frames, and replays cached packets on resend requests. The suites run it
+//! inside a deterministic snare simulation, so every wait is virtual time.
 
 #![allow(dead_code)]
 
@@ -18,28 +19,27 @@ use telegenic::gige::proto::gvcp;
 
 pub const MEM_SIZE: usize = 0x10000;
 
-/// Poll `cond` every 2 ms until it holds or `timeout` elapses. Use instead
-/// of a fixed sleep wherever a test waits on worker-thread progress — a
-/// loaded CI runner can deschedule a thread far longer than any sleep.
-pub fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if cond() {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return cond();
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+/// Where the driver binds its control socket, so the host IP it advertises
+/// for stream and message channels is the loopback address the fake sends
+/// to. Unbound, the simulation reports `0.0.0.0` for a socket connected to
+/// loopback, and the driver would advertise SCDA = 0.
+pub const LOOPBACK_ANY_PORT: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+/// One deterministic simulation per test: a single thread runs at a time,
+/// switching only where one waits, so a seed replays exactly.
+pub fn sim(seed: u64) -> snare::Sim {
+    snare::Sim::builder()
+        .deterministic()
+        .seed(seed)
+        .strict_sockopts()
+        .stuck_after(Duration::from_secs(30))
+        .build()
 }
 
 pub struct Knobs {
     /// Drop the next N inbound datagrams (simulated loss).
     pub drop_next: usize,
-    /// Answer every command with PENDING_ACK first, then the real ack after
-    /// this delay.
-    pub pending_ack_delay: Option<Duration>,
     /// Reject CCP writes with ACCESS_DENIED.
     pub deny_control: bool,
     /// Largest SCPS fire-test size answered with a test packet.
@@ -52,7 +52,6 @@ impl Default for Knobs {
     fn default() -> Self {
         Self {
             drop_next: 0,
-            pending_ack_delay: None,
             deny_control: false,
             mtu: u16::MAX,
             resend_replay: true,
@@ -340,12 +339,14 @@ pub const FAKE_TIMESTAMP_TICKS: u64 = 125_000_000;
 /// A minimal stored-method (uncompressed) PKZIP archive with one file.
 fn build_test_zip(content: &[u8]) -> Vec<u8> {
     const NAME: &[u8] = b"fake.xml";
+    let crc = crc32(content);
     let mut zip = Vec::new();
     zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
     zip.extend_from_slice(&20u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes()); // stored
-    zip.extend_from_slice(&[0u8; 8]); // time/date/crc (reader ignores crc)
+    zip.extend_from_slice(&[0u8; 4]); // time/date
+    zip.extend_from_slice(&crc.to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
@@ -359,7 +360,8 @@ fn build_test_zip(content: &[u8]) -> Vec<u8> {
     zip.extend_from_slice(&20u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes()); // stored
-    zip.extend_from_slice(&[0u8; 8]); // time/date/crc
+    zip.extend_from_slice(&[0u8; 4]); // time/date
+    zip.extend_from_slice(&crc.to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
     zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
@@ -377,6 +379,18 @@ fn build_test_zip(content: &[u8]) -> Vec<u8> {
     zip.extend_from_slice(&(central as u32).to_le_bytes());
     zip.extend_from_slice(&0u16.to_le_bytes());
     zip
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 fn gvsp_header(extended_ids: bool, frame_id: u64, packet_id: u32, content: u8) -> Vec<u8> {
@@ -489,21 +503,6 @@ fn serve(
             continue;
         };
 
-        let pending = knobs.lock().pending_ack_delay;
-        if let Some(delay) = pending {
-            let extension = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX) * 2;
-            let _ = socket.send_to(
-                &ack(
-                    gvcp::GvcpStatus::SUCCESS,
-                    gvcp::PENDING_ACK,
-                    cmd.req_id,
-                    &extension.to_be_bytes(),
-                ),
-                src,
-            );
-            std::thread::sleep(delay);
-        }
-
         let reply = handle_cmd(&cmd, mem, knobs, counters, gvsp);
         if let Some(reply) = reply {
             let _ = socket.send_to(&reply, src);
@@ -584,7 +583,7 @@ fn handle_cmd(
         gvcp::READ_REGISTER_CMD => {
             let mem = mem.lock();
             let mut values = Vec::new();
-            for chunk in cmd.payload.chunks_exact(4) {
+            for chunk in cmd.payload.as_chunks::<4>().0 {
                 let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
                 if addr + 4 > mem.len() {
                     return Some(nak(
@@ -609,7 +608,7 @@ fn handle_cmd(
             let mut fire_test_size = None;
             {
                 let mut mem = mem.lock();
-                for chunk in cmd.payload.chunks_exact(8) {
+                for chunk in cmd.payload.as_chunks::<8>().0 {
                     let addr =
                         u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as usize;
                     if addr + 4 > mem.len() {

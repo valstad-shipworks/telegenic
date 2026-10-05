@@ -14,10 +14,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_talker::py::{SocketOptions, ThreadOptions};
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::{AccessMode, GenICamera};
@@ -26,22 +27,36 @@ use crate::gige::stream::{
     FrameChannel, FrameStatus, PacketSize, ResendPolicy, StreamChannel, StreamConfig, StreamStats,
 };
 use crate::gige::{DeviceInfo, GigeConfig, LinkStats};
+use crate::tuning::TuningReport;
 
-pyo3::create_exception!(
-    telegenic,
-    CameraException,
-    pyo3::exceptions::PyRuntimeError,
-    "Raised when the transport link fails: connect/acknowledge timeout, I/O \
-     error, device NAK, lost control, or a malformed packet."
-);
+mod exceptions {
+    pyo3::create_exception!(
+        telegenic,
+        CameraError,
+        pyo3::exceptions::PyRuntimeError,
+        "Raised when the transport link fails: connect/acknowledge timeout, I/O \
+         error, device NAK, lost control, or a malformed packet."
+    );
 
-pyo3::create_exception!(
-    telegenic,
-    GenicamException,
-    pyo3::exceptions::PyRuntimeError,
-    "Raised by the GenICam feature layer: unknown feature, wrong type or \
-     access mode, value out of range, or a broken device description."
-);
+    pyo3::create_exception!(
+        telegenic,
+        GenicamError,
+        pyo3::exceptions::PyRuntimeError,
+        "Raised by the GenICam feature layer: unknown feature, wrong type or \
+         access mode, value out of range, or a broken device description."
+    );
+}
+
+pub(crate) use exceptions::{CameraError as CameraException, GenicamError as GenicamException};
+
+/// A Python seconds argument as a `Duration`.
+fn seconds(name: &str, value: f64) -> PyResult<Duration> {
+    Duration::try_from_secs_f64(value).map_err(|_| {
+        PyValueError::new_err(format!(
+            "{name} must be a finite, non-negative number of seconds, got {value}"
+        ))
+    })
+}
 
 fn parse_ip(ip: &str) -> PyResult<IpAddr> {
     ip.parse()
@@ -55,8 +70,12 @@ fn build_stream_config(
     packet_size: Option<u16>,
     packet_delay: Option<u32>,
     resend: bool,
+    thread: Option<ThreadOptions>,
+    stream_socket: Option<SocketOptions>,
 ) -> StreamConfig {
     let mut cfg = StreamConfig::new();
+    cfg.thread = thread.unwrap_or_default().0;
+    cfg.stream_socket = stream_socket.unwrap_or_default().0;
     cfg.channel = channel;
     cfg.n_buffers = n_buffers;
     if let Some(size) = packet_size {
@@ -122,7 +141,10 @@ impl Camera {
         heartbeat_timeout = 3.0,
         exclusive = false,
         local_ip = None,
+        thread = None,
+        control_socket = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn py_new(
         ip: &str,
         gvcp_timeout: f64,
@@ -130,12 +152,23 @@ impl Camera {
         heartbeat_timeout: f64,
         exclusive: bool,
         local_ip: Option<&str>,
+        thread: Option<ThreadOptions>,
+        control_socket: Option<SocketOptions>,
     ) -> PyResult<Self> {
         let mut cfg = GigeConfig::new(parse_ip(ip)?);
-        cfg.gvcp_timeout = Duration::from_secs_f64(gvcp_timeout);
+        cfg.gvcp_timeout = seconds("gvcp_timeout", gvcp_timeout)?;
         cfg.retries = retries;
-        cfg.heartbeat_timeout_ms = (heartbeat_timeout * 1000.0) as u32;
+        cfg.heartbeat_timeout_ms = u32::try_from(
+            seconds("heartbeat_timeout", heartbeat_timeout)?.as_millis(),
+        )
+        .map_err(|_| {
+            PyValueError::new_err(format!(
+                "heartbeat_timeout {heartbeat_timeout} s does not fit the device's 32-bit millisecond register"
+            ))
+        })?;
         cfg.exclusive = exclusive;
+        cfg.thread = thread.unwrap_or_default().0;
+        cfg.control_socket = control_socket.unwrap_or_default().0;
         if let Some(local) = local_ip {
             cfg.local_addr = Some(SocketAddr::new(parse_ip(local)?, 0));
         }
@@ -154,12 +187,9 @@ impl Camera {
 
     #[pyo3(name = "disconnect", signature = (deadline = 0.5))]
     fn py_disconnect(&self, py: Python<'_>, deadline: f64) -> PyResult<()> {
+        let deadline = seconds("deadline", deadline)?;
         let _token = self.claim("a disconnect")?;
-        py.detach(|| {
-            self.inner
-                .lock()
-                .disconnect(Duration::from_secs_f64(deadline))
-        });
+        py.detach(|| self.inner.lock().disconnect(deadline));
         Ok(())
     }
 
@@ -176,6 +206,12 @@ impl Camera {
     #[pyo3(name = "link_stats")]
     fn py_link_stats(&self) -> Option<LinkStats> {
         self.inner.lock().transport().stats()
+    }
+
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let report = self.inner.lock().transport().tuning_report().cloned();
+        report.map(|r| tuning_dict(py, r)).transpose()
     }
 
     #[pyo3(name = "feature_names")]
@@ -289,6 +325,7 @@ impl Camera {
         self.inner.lock().invalidate_caches().map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(name = "start_acquisition", signature = (
         *,
         channel = 0,
@@ -296,6 +333,8 @@ impl Camera {
         packet_size = None,
         packet_delay = None,
         resend = true,
+        thread = None,
+        stream_socket = None,
     ))]
     fn py_start_acquisition(
         &self,
@@ -305,9 +344,19 @@ impl Camera {
         packet_size: Option<u16>,
         packet_delay: Option<u32>,
         resend: bool,
+        thread: Option<ThreadOptions>,
+        stream_socket: Option<SocketOptions>,
     ) -> PyResult<PyAcquisition> {
         let token = self.claim("an acquisition")?;
-        let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
+        let cfg = build_stream_config(
+            channel,
+            n_buffers,
+            packet_size,
+            packet_delay,
+            resend,
+            thread,
+            stream_socket,
+        );
         let (state, frames) = py.detach(|| AcqState::start(&mut self.inner.lock(), cfg))?;
         Ok(PyAcquisition {
             cam: self.inner.clone(),
@@ -325,6 +374,8 @@ impl Camera {
         packet_size = None,
         packet_delay = None,
         resend = true,
+        thread = None,
+        stream_socket = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn py_snap(
@@ -336,17 +387,25 @@ impl Camera {
         packet_size: Option<u16>,
         packet_delay: Option<u32>,
         resend: bool,
+        thread: Option<ThreadOptions>,
+        stream_socket: Option<SocketOptions>,
     ) -> PyResult<PyFrame> {
+        let timeout = seconds("timeout", timeout)?;
         let _token = self.claim("a snap")?;
-        let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
-        let frame = py.detach(|| {
-            self.inner
-                .lock()
-                .snap(cfg, Duration::from_secs_f64(timeout))
-        })?;
+        let cfg = build_stream_config(
+            channel,
+            n_buffers,
+            packet_size,
+            packet_delay,
+            resend,
+            thread,
+            stream_socket,
+        );
+        let frame = py.detach(|| self.inner.lock().snap(cfg, timeout))?;
         Ok(PyFrame { inner: frame })
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(name = "snapshot_session", signature = (
         *,
         channel = 0,
@@ -354,6 +413,8 @@ impl Camera {
         packet_size = None,
         packet_delay = None,
         resend = true,
+        thread = None,
+        stream_socket = None,
     ))]
     fn py_snapshot_session(
         &self,
@@ -363,9 +424,19 @@ impl Camera {
         packet_size: Option<u16>,
         packet_delay: Option<u32>,
         resend: bool,
+        thread: Option<ThreadOptions>,
+        stream_socket: Option<SocketOptions>,
     ) -> PyResult<PySnapshotSession> {
         let token = self.claim("a snapshot session")?;
-        let cfg = build_stream_config(channel, n_buffers, packet_size, packet_delay, resend);
+        let cfg = build_stream_config(
+            channel,
+            n_buffers,
+            packet_size,
+            packet_delay,
+            resend,
+            thread,
+            stream_socket,
+        );
         let state = py.detach(|| SessionState::open(&mut self.inner.lock(), cfg))?;
         Ok(PySnapshotSession {
             cam: self.inner.clone(),
@@ -490,13 +561,14 @@ impl PySnapshotSession {
 impl PySnapshotSession {
     #[pyo3(name = "snap", signature = (timeout = 5.0))]
     fn py_snap(&self, py: Python<'_>, timeout: f64) -> PyResult<PyFrame> {
+        let timeout = seconds("timeout", timeout)?;
         let frame = py.detach(|| -> PyResult<Arc<crate::Frame>> {
             let mut cam = self.cam.lock();
             let state = self.state.lock();
             let state = state
                 .as_ref()
                 .ok_or_else(|| PyValueError::new_err("snapshot session is closed"))?;
-            Ok(state.snap(&mut cam, Duration::from_secs_f64(timeout))?)
+            Ok(state.snap(&mut cam, timeout)?)
         })?;
         Ok(PyFrame { inner: frame })
     }
@@ -517,6 +589,17 @@ impl PySnapshotSession {
             .as_ref()
             .map(|s| s.stream.packet_size())
             .ok_or_else(|| PyValueError::new_err("snapshot session is closed"))
+    }
+
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = self
+            .state
+            .lock()
+            .as_ref()
+            .map(|s| s.stream.tuning_report().clone())
+            .ok_or_else(|| PyValueError::new_err("snapshot session is closed"))?;
+        tuning_dict(py, report)
     }
 
     #[pyo3(name = "is_closed")]
@@ -640,9 +723,11 @@ impl PyAcquisition {
 #[pymethods]
 impl PyAcquisition {
     #[pyo3(name = "wait_for", signature = (timeout = 1.0))]
-    fn py_wait_for(&self, py: Python<'_>, timeout: f64) -> Option<PyFrame> {
-        py.detach(|| self.frames.wait_for(Duration::from_secs_f64(timeout)))
-            .map(|inner| PyFrame { inner })
+    fn py_wait_for(&self, py: Python<'_>, timeout: f64) -> PyResult<Option<PyFrame>> {
+        let timeout = seconds("timeout", timeout)?;
+        Ok(py
+            .detach(|| self.frames.wait_for(timeout))
+            .map(|inner| PyFrame { inner }))
     }
 
     #[pyo3(name = "try_recv")]
@@ -679,6 +764,12 @@ impl PyAcquisition {
     #[pyo3(name = "packet_size")]
     fn py_packet_size(&self) -> PyResult<u16> {
         self.with_stream(StreamChannel::packet_size)
+    }
+
+    #[pyo3(name = "tuning_report")]
+    fn py_tuning_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = self.with_stream(|s| s.tuning_report().clone())?;
+        tuning_dict(py, report)
     }
 
     #[pyo3(name = "local_addr")]
@@ -862,9 +953,11 @@ const NEXT_POLL: Duration = Duration::from_millis(100);
 #[pymethods]
 impl FrameChannel {
     #[pyo3(name = "wait_for")]
-    fn py_wait_for(&self, py: Python<'_>, timeout: f64) -> Option<PyFrame> {
-        py.detach(|| self.wait_for(Duration::from_secs_f64(timeout)))
-            .map(|inner| PyFrame { inner })
+    fn py_wait_for(&self, py: Python<'_>, timeout: f64) -> PyResult<Option<PyFrame>> {
+        let timeout = seconds("timeout", timeout)?;
+        Ok(py
+            .detach(|| self.wait_for(timeout))
+            .map(|inner| PyFrame { inner }))
     }
 
     #[pyo3(name = "try_recv")]
@@ -986,13 +1079,22 @@ impl LinkStats {
     }
 }
 
+/// `{"thread": {...}, "socket": {...}}`, each in fast-talker's report shape:
+/// `{"applied": [...], "adjusted": [...], "skipped": [...]}`.
+fn tuning_dict(py: Python<'_>, report: TuningReport) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("thread", report.thread)?;
+    d.set_item("socket", report.socket)?;
+    Ok(d)
+}
+
 /// Broadcast a GigE Vision discovery beacon on every Up IPv4 adapter and
 /// return the devices that answer within `timeout` seconds.
 #[pyfunction]
 #[pyo3(signature = (timeout = 1.0))]
 fn discover(py: Python<'_>, timeout: f64) -> PyResult<Vec<DeviceInfo>> {
     let cfg = DiscoveryConfig {
-        recv_window: Duration::from_secs_f64(timeout),
+        recv_window: seconds("timeout", timeout)?,
         ..DiscoveryConfig::default()
     };
     let devices = py.detach(|| discovery::discover(&cfg))?;
@@ -1016,5 +1118,6 @@ fn telegenic_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DeviceInfo>()?;
 
     m.add_function(wrap_pyfunction!(discover, m)?)?;
+    fast_talker::py::register_as(m, "telegenic")?;
     Ok(())
 }

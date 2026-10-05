@@ -16,11 +16,12 @@
 //! the broadcast address instead of routing a unicast reply.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::time::Duration;
 
-use snare::net::UdpSocket;
+use fast_talker::nic;
 
+use crate::clock::Instant;
 use crate::error::{CameraError, Result};
 use crate::gige::proto::bootstrap::DeviceInfo;
 use crate::gige::proto::gvcp::{self, Ack};
@@ -42,25 +43,27 @@ pub struct NetworkAdapter {
 /// Enumerate Up IPv4 adapters, skipping loopback and unspecified addresses.
 pub fn enumerate_adapters() -> io::Result<Vec<NetworkAdapter>> {
     let mut out = Vec::new();
-    for iface in if_addrs::get_if_addrs()? {
-        if iface.is_loopback() {
+    for iface in nic::interfaces()? {
+        if !iface.up || iface.loopback {
             continue;
         }
-        let if_addrs::IfAddr::V4(v4) = iface.addr.clone() else {
-            continue;
-        };
-        if v4.ip.is_unspecified() {
-            continue;
+        for a in &iface.addresses {
+            let (IpAddr::V4(ip), IpAddr::V4(netmask)) = (a.ip, a.netmask()) else {
+                continue;
+            };
+            if ip.is_unspecified() {
+                continue;
+            }
+            let broadcast = a
+                .broadcast
+                .unwrap_or_else(|| Ipv4Addr::from(u32::from(ip) | !u32::from(netmask)));
+            out.push(NetworkAdapter {
+                name: iface.name.clone(),
+                ip,
+                netmask,
+                broadcast,
+            });
         }
-        let broadcast = v4
-            .broadcast
-            .unwrap_or_else(|| Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)));
-        out.push(NetworkAdapter {
-            name: iface.name,
-            ip: v4.ip,
-            netmask: v4.netmask,
-            broadcast,
-        });
     }
     Ok(out)
 }

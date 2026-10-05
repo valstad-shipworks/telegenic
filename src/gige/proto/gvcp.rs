@@ -166,18 +166,22 @@ impl<'a> Ack<'a> {
         })
     }
 
-    /// PENDING_ACK payload: the replacement timeout, in milliseconds.
+    /// PENDING_ACK payload: a reserved half-word, then the 16-bit time to
+    /// completion in milliseconds.
     pub fn pending_ack_timeout_ms(&self) -> Option<u32> {
         if self.answer != PENDING_ACK {
             return None;
         }
-        Some(U32::read_from_prefix(self.payload).ok()?.0.get())
+        let ms = self.payload.get(2..4)?;
+        Some(u32::from(u16::from_be_bytes([ms[0], ms[1]])))
     }
 
     /// READ_REGISTER_ACK payload: one u32 value per requested address.
     pub fn register_values(&self) -> impl Iterator<Item = u32> + '_ {
         self.payload
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| U32::read_from_bytes(c).map_or(0, |v| v.get()))
     }
 }

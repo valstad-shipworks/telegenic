@@ -24,10 +24,17 @@ parsed from the device's own description XML. Typical use::
                 print(frame)
 """
 
-from __future__ import annotations
-
 import enum
-from typing import Iterator, final
+from collections.abc import Iterator
+from typing import final
+
+from ._options import (
+    ProcessGuard,
+    SocketOptionsLike,
+    ThreadOptionsLike,
+    TuningReportDict,
+    apply_process_options,
+)
 
 __version__: str
 
@@ -42,8 +49,10 @@ __all__ = [
     "FrameStatus",
     "GenicamError",
     "LinkStats",
+    "ProcessGuard",
     "SnapshotSession",
     "StreamStats",
+    "apply_process_options",
     "discover",
 ]
 
@@ -108,6 +117,8 @@ class Camera:
         heartbeat_timeout: float = 3.0,
         exclusive: bool = False,
         local_ip: str | None = None,
+        thread: ThreadOptionsLike = None,
+        control_socket: SocketOptionsLike = None,
     ) -> Camera:
         """Create a disconnected camera targeting ``ip:3956``.
 
@@ -122,6 +133,20 @@ class Camera:
             even read).
         :param local_ip: Bind the control socket to this local address, for
             multi-homed hosts.
+        :param thread: Options the GVCP worker applies to itself during
+            :meth:`connect`, e.g. ``[("cpu_affinity", [2])]``. Accepted:
+            ``cpu_affinity``, ``prefault_stack``, ``linux_nice``,
+            ``unix_scheduler`` (``other``/``batch``/``idle``),
+            ``win_priority`` below ``time_critical``,
+            ``win_disable_power_throttling``, ``macos_qos``. Real-time
+            classes are refused: this thread blocks on slow round-trips.
+            Options for another platform, or that this one cannot do, are
+            skipped with a warning. Process-wide settings are the
+            application's to make.
+        :param control_socket: Options for the GVCP socket, applied before
+            bind: ``recv_buffer``, ``bind_device``, ``dscp``,
+            ``linux_priority``. The busy-poll options, ``send_buffer``,
+            ``dont_fragment`` and ``win_cpu_affinity`` are refused.
         :raises ValueError: if an IP string does not parse.
         """
 
@@ -149,6 +174,12 @@ class Camera:
 
     def link_stats(self) -> LinkStats | None:
         """Control-channel counters, or ``None`` while disconnected."""
+
+    def tuning_report(self) -> TuningReportDict | None:
+        """What ``thread`` and ``control_socket`` came to on the current
+        connection: the options applied, those the platform adjusted (a
+        ``recv_buffer`` capped by the kernel, say) and those skipped; or
+        ``None`` while disconnected."""
 
     def feature_names(self) -> list[str]:
         """Every node name in the device description (features plus the
@@ -188,6 +219,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> Acquisition:
         """Start continuous acquisition, returning a guard that owns the
         whole lifecycle.
@@ -203,6 +236,16 @@ class Camera:
             negotiate the largest the link carries.
         :param packet_delay: Inter-packet delay in device timestamp ticks.
         :param resend: Request resends for missing packets.
+        :param thread: Options the GVSP worker applies to itself before the
+            stream opens. Every thread option except
+            ``macos_time_constraint`` is accepted. Options for another
+            platform, or that this one cannot do, are skipped with a warning.
+        :param stream_socket: Options for the GVSP socket, applied before
+            bind, after a default 8 MiB ``recv_buffer`` that a
+            ``recv_buffer`` here replaces. Accepted: ``recv_buffer``,
+            ``bind_device``, the ``linux_busy_poll`` trio and
+            ``win_cpu_affinity``. ``send_buffer``, ``dont_fragment``,
+            ``dscp`` and ``linux_priority`` are refused.
         :raises ValueError: while another acquisition or snapshot session
             is active.
         """
@@ -216,6 +259,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> Frame:
         """Capture exactly one frame, opening and closing the stream around
         it. For repeated captures use :meth:`snapshot_session`, which pays
@@ -238,6 +283,8 @@ class Camera:
         packet_size: int | None = None,
         packet_delay: int | None = None,
         resend: bool = True,
+        thread: ThreadOptionsLike = None,
+        stream_socket: SocketOptionsLike = None,
     ) -> SnapshotSession:
         """Open a stream channel for on-demand single-frame capture.
 
@@ -275,6 +322,10 @@ class SnapshotSession:
     def stats(self) -> StreamStats: ...
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
+
+    def tuning_report(self) -> TuningReportDict:
+        """What the stream's ``thread`` and ``stream_socket`` options came
+        to."""
 
     def is_closed(self) -> bool: ...
     def close(self) -> None:
@@ -318,6 +369,10 @@ class Acquisition:
     def stats(self) -> StreamStats: ...
     def packet_size(self) -> int:
         """The negotiated (or configured) GVSP packet size."""
+
+    def tuning_report(self) -> TuningReportDict:
+        """What the stream's ``thread`` and ``stream_socket`` options came
+        to."""
 
     def local_addr(self) -> str:
         """Where the device sends this stream, as ``ip:port``."""
@@ -411,6 +466,9 @@ class StreamStats:
     frames_dropped: int
     """Completed frames a subscriber could not take (its channel was
     full)."""
+    socket_drops: int
+    """Datagrams the stream socket dropped because its receive buffer was
+    full. Linux only; 0 elsewhere."""
 
 @final
 class LinkStats:

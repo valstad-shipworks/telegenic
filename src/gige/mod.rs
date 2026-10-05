@@ -14,11 +14,12 @@ pub mod proto;
 mod runner;
 pub mod stream;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use fast_talker::options::{SocketOption, ThreadOption};
 use parking_lot::Mutex;
 
 use crate::error::{CameraError, Result};
@@ -28,46 +29,16 @@ use crate::gige::proto::gvsp;
 use crate::gige::runner::ToWorker;
 use crate::gige::stream::{StreamChannel, StreamConfig, StreamShared};
 use crate::handle::{ResponseHandle, unwrap_arc};
-use crate::thread_util::{ThreadConfig, ThreadHandle};
+use crate::link::{LinkCounters, LinkStats as HealthStats};
+use crate::thread_util::ThreadHandle;
+use crate::tuning::{self, SocketRole, TuningReport};
+use crate::wire::{
+    ControlRx, ControlTelemetry, ControlTx, GvcpCmd, GvspPacket, StreamTelemetry, TelemetrySink,
+};
 
 pub use proto::bootstrap::DeviceInfo;
 pub use proto::gvcp::GvcpStatus;
 pub use proto::gvsp::PixelFormat;
-
-/// Best-effort SO_RCVBUF sizing for the stream socket; bursts of a full
-/// frame must fit between two worker wakeups.
-fn set_receive_buffer(socket: &snare::net::UdpSocket, cfg: &StreamConfig, payload_size: usize) {
-    let request = if cfg.socket_buffer != 0 {
-        cfg.socket_buffer
-    } else {
-        (payload_size + 1024).clamp(256 * 1024, 8 * 1024 * 1024)
-    };
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let value = request as libc::c_int;
-        let rc = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                (&raw const value).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            tracing::warn!(
-                "SO_RCVBUF={request} not applied: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tracing::debug!("SO_RCVBUF sizing not implemented on this platform ({request} requested)");
-        let _ = socket;
-    }
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GigeConfig {
@@ -87,7 +58,23 @@ pub struct GigeConfig {
     pub exclusive: bool,
     /// Buffered events per subscribed [`EventChannel`].
     pub event_capacity: usize,
-    pub thread_cfg: ThreadConfig,
+    /// Options the GVCP worker applies to itself before `connect` returns;
+    /// one it fails to apply fails `connect`. Accepted: `CpuAffinity`,
+    /// `PrefaultStack`, `LinuxNice`, `UnixScheduler(Other | Batch | Idle)`,
+    /// `WinPriority` below `TimeCritical`, `WinDisablePowerThrottling`,
+    /// `MacOsQos`. Real-time classes (`RtPriority`, `UnixScheduler(Fifo |
+    /// RoundRobin)`, `WinPriority(TimeCritical)`, `WinMmcss`,
+    /// `MacOsTimeConstraint`) are refused: this thread blocks on slow
+    /// round-trips and would only starve the rest of the system. Options for
+    /// another platform are skipped with a warning. Process-wide settings
+    /// are the application's to make, with
+    /// [`ProcessOption::apply_all`](fast_talker::options::ProcessOption::apply_all).
+    pub thread: Vec<ThreadOption>,
+    /// Options for the GVCP socket, applied before bind. Accepted:
+    /// `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority`. Refused: the
+    /// busy-poll options (they burn a core on a slow loop), `SendBuffer`,
+    /// `DontFragment` and `WinCpuAffinity`.
+    pub control_socket: Vec<SocketOption>,
 }
 
 impl GigeConfig {
@@ -100,7 +87,8 @@ impl GigeConfig {
             heartbeat_timeout_ms: 3000,
             exclusive: false,
             event_capacity: 64,
-            thread_cfg: ThreadConfig::default(),
+            thread: Vec::new(),
+            control_socket: Vec::new(),
         }
     }
 
@@ -173,6 +161,7 @@ pub struct EventChannel {
 }
 
 impl EventChannel {
+    /// Block until an event is buffered or `timeout` elapses.
     pub fn wait_for(&self, timeout: Duration) -> Option<GvcpEvent> {
         self.rx.recv_timeout(timeout).ok()
     }
@@ -185,7 +174,6 @@ impl EventChannel {
         self.rx.is_disconnected()
     }
 
-    #[cfg(feature = "async")]
     pub async fn recv_async(&self) -> Option<GvcpEvent> {
         self.rx.recv_async().await.ok()
     }
@@ -196,13 +184,15 @@ impl EventChannel {
 /// its way down. Everything else lives in [`Connection`] as plain fields.
 pub(crate) struct Shared {
     pub(crate) stats: Mutex<LinkStats>,
+    pub(crate) link: Arc<LinkCounters>,
     control_lost: AtomicBool,
 }
 
 impl Shared {
-    fn new() -> Self {
+    fn new(link: Arc<LinkCounters>) -> Self {
         Self {
             stats: Mutex::new(LinkStats::default()),
+            link,
             control_lost: AtomicBool::new(false),
         }
     }
@@ -341,6 +331,7 @@ struct Connection {
     capabilities: u32,
     genicam_xml: Option<Arc<[u8]>>,
     genicam: Option<crate::genicam::Genicam>,
+    tuning: TuningReport,
 }
 
 /// A GigE Vision device over its GVCP control channel.
@@ -354,6 +345,8 @@ struct Connection {
 pub struct GigECamera {
     cfg: GigeConfig,
     connection: Option<Connection>,
+    telemetry: Option<ControlTelemetry>,
+    link: Arc<LinkCounters>,
 }
 
 impl std::fmt::Debug for GigECamera {
@@ -384,7 +377,18 @@ impl GigECamera {
         Self {
             cfg,
             connection: None,
+            telemetry: None,
+            link: Arc::new(LinkCounters::default()),
         }
+    }
+
+    /// Install a telemetry sink observing every GVCP datagram on the control
+    /// channel. Takes effect on the next [`connect`](Self::connect); the live
+    /// connection keeps the sink it was established with. Stream channels
+    /// carry their own sink — see
+    /// [`open_stream_with_telemetry`](Self::open_stream_with_telemetry).
+    pub fn set_telemetry<S: TelemetrySink<ControlTx, ControlRx>>(&mut self, telemetry: S) {
+        self.telemetry = Some(Arc::new(telemetry));
     }
 
     pub fn config(&self) -> &GigeConfig {
@@ -408,7 +412,7 @@ impl GigECamera {
             // Dropping joins the dead worker and frees per-connection state.
             self.connection = None;
         }
-        let conn = establish(self.cfg.clone())?;
+        let conn = establish(self.cfg.clone(), self.telemetry.clone(), self.link.clone())?;
         tracing::debug!(
             addr = %conn.device_addr,
             model = %conn.info.model,
@@ -427,10 +431,8 @@ impl GigECamera {
             return;
         };
         tracing::debug!(addr = %conn.device_addr, "disconnecting");
-        let _ = conn.port.send(ToWorker::Shutdown);
-        let start = std::time::Instant::now();
-        while conn.thread.is_alive() && start.elapsed() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+        if conn.port.send(ToWorker::Shutdown).is_ok() {
+            conn.thread.wait_exited(deadline);
         }
         conn.thread.request_stop();
         // Dropping `conn` joins the worker.
@@ -557,6 +559,18 @@ impl GigECamera {
         self.connection.as_ref().map(|c| *c.shared.stats.lock())
     }
 
+    /// Link-health counters of this camera, cumulative across connections
+    /// and stream channels.
+    pub fn link_stats(&self) -> HealthStats {
+        self.link.snapshot()
+    }
+
+    /// What [`GigeConfig::thread`] and [`GigeConfig::control_socket`] came
+    /// to on the current connection, if any.
+    pub fn tuning_report(&self) -> Option<&TuningReport> {
+        self.connection.as_ref().map(|c| &c.tuning)
+    }
+
     /// Open a GVSP stream channel: bind a receive socket, point the device's
     /// SCDA/SCP at it, settle the packet size (negotiating it when
     /// configured `Auto`), and start the reassembly worker.
@@ -565,10 +579,36 @@ impl GigECamera {
     /// `AcquisitionStart` feature, or
     /// [`GenICamera::start_acquisition`](crate::GenICamera)).
     pub fn open_stream(&self, cfg: StreamConfig) -> Result<StreamChannel> {
+        self.open_stream_inner(cfg, None)
+    }
+
+    /// Like [`open_stream`](Self::open_stream), with a telemetry sink
+    /// observing every GVSP datagram the channel receives and every resend
+    /// request it sends.
+    ///
+    /// The sink is called once per datagram on the receive thread — tens of
+    /// thousands of times a second on a fast link — and each call materializes
+    /// an owned copy of the packet body. Keep the implementation to a queue
+    /// push, and do the real work elsewhere.
+    pub fn open_stream_with_telemetry<S: TelemetrySink<GvcpCmd, GvspPacket>>(
+        &self,
+        cfg: StreamConfig,
+        telemetry: S,
+    ) -> Result<StreamChannel> {
+        self.open_stream_inner(cfg, Some(Arc::new(telemetry)))
+    }
+
+    fn open_stream_inner(
+        &self,
+        cfg: StreamConfig,
+        telemetry: Option<StreamTelemetry>,
+    ) -> Result<StreamChannel> {
         let payload_size = cfg
             .payload_size
             .filter(|&n| n > 0)
             .ok_or_else(|| CameraError::Protocol("payload_size must be set".into()))?;
+        tuning::check_thread(tuning::ThreadRole::Stream, &cfg.thread)?;
+        tuning::check_socket(SocketRole::UdpStreamRx, &cfg.stream_socket)?;
         let conn = self.conn()?;
         let port = &conn.port;
         let budget = port.budget();
@@ -578,7 +618,9 @@ impl GigECamera {
             Some(a) => a,
             None => SocketAddr::new(advertised_host_ip(conn)?, 0),
         };
-        let socket = snare::net::UdpSocket::bind(local)?;
+        let (socket, socket_report) =
+            tuning::bind_udp(SocketRole::UdpStreamRx, local, &cfg.stream_socket_options())
+                .map_err(std::io::Error::from)?;
         let bound = socket.local_addr()?;
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));
@@ -589,7 +631,6 @@ impl GigECamera {
                 "stream host IP unresolved; advertising SCDA=0 (device streams to the GVCP requester)"
             );
         }
-        set_receive_buffer(&socket, &cfg, payload_size);
 
         port.write_register(
             bootstrap::STREAM_CHANNEL_DEST_ADDRESS + base,
@@ -604,64 +645,77 @@ impl GigECamera {
         .wait_timeout(budget)
         .map_err(unwrap_arc)?;
 
-        let scps_addr = bootstrap::STREAM_CHANNEL_PACKET_SIZE + base;
-        let packet_size = match cfg.packet_size {
-            crate::gige::stream::PacketSize::Fixed(n) => {
-                port.write_register(scps_addr, u32::from(n))
+        let open = move || -> Result<StreamChannel> {
+            let scps_addr = bootstrap::STREAM_CHANNEL_PACKET_SIZE + base;
+            let packet_size = match cfg.packet_size {
+                crate::gige::stream::PacketSize::Fixed(n) => {
+                    port.write_register(scps_addr, u32::from(n))
+                        .wait_timeout(budget)
+                        .map_err(unwrap_arc)?;
+                    n
+                }
+                crate::gige::stream::PacketSize::Auto => {
+                    negotiate_packet_size(port, conn.device_addr.ip(), &socket, scps_addr)?
+                }
+            };
+            if let Some(delay) = cfg.packet_delay {
+                port.write_register(bootstrap::STREAM_CHANNEL_PACKET_DELAY + base, delay)
                     .wait_timeout(budget)
                     .map_err(unwrap_arc)?;
-                n
             }
-            crate::gige::stream::PacketSize::Auto => {
-                negotiate_packet_size(port, conn.device_addr.ip(), &socket, scps_addr)?
-            }
-        };
-        if let Some(delay) = cfg.packet_delay {
-            port.write_register(bootstrap::STREAM_CHANNEL_PACKET_DELAY + base, delay)
+
+            let tick_frequency = port
+                .read_registers(vec![
+                    bootstrap::TIMESTAMP_TICK_FREQUENCY_HIGH,
+                    bootstrap::TIMESTAMP_TICK_FREQUENCY_LOW,
+                ])
                 .wait_timeout(budget)
-                .map_err(unwrap_arc)?;
-        }
+                .map(|v| (u64::from(v[0]) << 32) | u64::from(v[1]))
+                .unwrap_or(0);
 
-        let tick_frequency = port
-            .read_registers(vec![
-                bootstrap::TIMESTAMP_TICK_FREQUENCY_HIGH,
-                bootstrap::TIMESTAMP_TICK_FREQUENCY_LOW,
-            ])
-            .wait_timeout(budget)
-            .map(|v| (u64::from(v[0]) << 32) | u64::from(v[1]))
-            .unwrap_or(0);
+            let resend_enabled = cfg.resend == crate::gige::stream::ResendPolicy::Always
+                && conn.capabilities & bootstrap::CAP_PACKET_RESEND != 0;
 
-        let resend_enabled = cfg.resend == crate::gige::stream::ResendPolicy::Always
-            && conn.capabilities & bootstrap::CAP_PACKET_RESEND != 0;
+            let shared = Arc::new(StreamShared {
+                stats: Mutex::new(Default::default()),
+                link: self.link.clone(),
+            });
+            let (to_worker, rx) = flume::unbounded();
+            let channel = cfg.channel;
+            let (thread, thread_report) = crate::gige::stream::runner::spawn(
+                socket,
+                crate::gige::stream::runner::LinkParams {
+                    device_gvcp_addr: conn.device_addr,
+                    scps_packet_size: packet_size,
+                    payload_size,
+                    resend_enabled,
+                    tick_frequency,
+                },
+                rx,
+                shared.clone(),
+                cfg,
+                telemetry,
+            )?;
 
-        let shared = Arc::new(StreamShared {
-            stats: Mutex::new(Default::default()),
-        });
-        let (to_worker, rx) = flume::unbounded();
-        let channel = cfg.channel;
-        let thread = crate::gige::stream::runner::spawn(
-            socket,
-            crate::gige::stream::runner::LinkParams {
-                device_gvcp_addr: conn.device_addr,
-                scps_packet_size: packet_size,
-                payload_size,
-                resend_enabled,
-                tick_frequency,
-            },
-            rx,
-            shared.clone(),
-            cfg,
-        )?;
-
-        tracing::debug!(channel, local = %bound, packet_size, "stream channel opened");
-        Ok(StreamChannel {
-            to_worker,
-            thread,
-            shared,
-            control: port.clone(),
-            channel_base: base,
-            packet_size,
-            local_addr: bound,
+            tracing::debug!(channel, local = %bound, packet_size, "stream channel opened");
+            Ok(StreamChannel {
+                to_worker,
+                thread,
+                shared,
+                control: port.clone(),
+                channel_base: base,
+                packet_size,
+                local_addr: bound,
+                tuning: TuningReport {
+                    thread: thread_report,
+                    socket: socket_report.summary(),
+                },
+            })
+        };
+        open().inspect_err(|_| {
+            let _ = port
+                .write_register(bootstrap::STREAM_CHANNEL_PORT + base, 0)
+                .wait_timeout(budget);
         })
     }
 
@@ -718,6 +772,13 @@ impl GigECamera {
         }
     }
 
+    pub(crate) fn genicam_graph(&self) -> crate::error::GenicamResult<&crate::genicam::Genicam> {
+        self.conn()?
+            .genicam
+            .as_ref()
+            .ok_or_else(|| crate::error::GenicamError::Xml("feature model not loaded".into()))
+    }
+
     pub(crate) fn genicam_ref(&self) -> Option<&crate::genicam::Genicam> {
         self.connection.as_ref()?.genicam.as_ref()
     }
@@ -725,27 +786,35 @@ impl GigECamera {
 
 /// The host IP to advertise to the device for a return channel (GVSP stream
 /// or message channel). Prefers the control socket's bound IP — it provably
-/// reaches the device — then a probe socket, whose `connect` a real kernel
-/// resolves to the outbound interface's address. On a host that only has
-/// wildcard binds (e.g. a virtual network shim) both stay unspecified; the
-/// caller then advertises an address of 0 and relies on the device streaming
-/// back to the GVCP requester (see `GigeDevice::stream_dest`).
+/// reaches the device — then fast-talker's `nic::source_for`: the address a
+/// real kernel picks for the outbound route, or where connecting leaves it
+/// unspecified, the host's address on the device's subnet. On a host with
+/// neither (only wildcard binds, e.g. a virtual network shim) the caller
+/// advertises an address of 0 and relies on the device streaming back to
+/// the GVCP requester (see `GigeDevice::stream_dest`).
 fn advertised_host_ip(conn: &Connection) -> Result<IpAddr> {
     if !conn.local_addr.ip().is_unspecified() {
         return Ok(conn.local_addr.ip());
     }
-    let probe = snare::net::UdpSocket::bind("0.0.0.0:0")?;
-    probe.connect(conn.device_addr)?;
-    Ok(probe.local_addr()?.ip())
+    match fast_talker::nic::source_for(conn.device_addr.ip()) {
+        Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            Ok(Ipv4Addr::UNSPECIFIED.into())
+        }
+        found => Ok(found?),
+    }
 }
 
 /// Dial and bootstrap one connection. On any failure the worker is torn
 /// down (joined, control released) by `ThreadHandle`'s drop before the
 /// error propagates — nothing leaks out of a half-built connection.
-fn establish(cfg: GigeConfig) -> Result<Connection> {
-    let shared = Arc::new(Shared::new());
+fn establish(
+    cfg: GigeConfig,
+    telemetry: Option<ControlTelemetry>,
+    link: Arc<LinkCounters>,
+) -> Result<Connection> {
+    let shared = Arc::new(Shared::new(link));
     let (to_worker, rx) = flume::unbounded();
-    let (thread, local_addr) = runner::spawn(rx, shared.clone(), cfg.clone())?;
+    let (thread, local_addr, tuning) = runner::spawn(rx, shared.clone(), cfg.clone(), telemetry)?;
     let port = ControlPort {
         to_worker,
         thread: thread.to_pass_in(),
@@ -792,6 +861,7 @@ fn establish(cfg: GigeConfig) -> Result<Connection> {
         capabilities,
         genicam_xml: None,
         genicam: None,
+        tuning,
     })
 }
 
@@ -877,6 +947,10 @@ fn fetch_device_info(port: &ControlPort) -> Result<DeviceInfo> {
     })
 }
 
+/// Largest device-hosted GenICam XML (or zip of one) fetched; real ones are
+/// a few hundred KiB.
+const MAX_XML_SIZE: usize = 64 << 20;
+
 fn fetch_genicam_xml(port: &ControlPort, url_addr: u32) -> Result<Arc<[u8]>> {
     let budget = port.budget();
     let raw = port
@@ -891,8 +965,12 @@ fn fetch_genicam_xml(port: &ControlPort, url_addr: u32) -> Result<Arc<[u8]>> {
         crate::genicam::XmlUrl::Local { address, size, .. } => {
             let address = u32::try_from(*address)
                 .map_err(|_| CameraError::Protocol("XML address beyond 32 bit".into()))?;
-            let budget = budget * (*size as u32 / 512 + 2);
-            port.read_memory(address, *size as u32)
+            let size = u32::try_from(*size)
+                .ok()
+                .filter(|&s| s as usize <= MAX_XML_SIZE)
+                .ok_or_else(|| CameraError::Protocol(format!("XML size {size} out of range")))?;
+            let budget = budget * (size / 512 + 2);
+            port.read_memory(address, size)
                 .wait_timeout(budget)
                 .map_err(unwrap_arc)?
         }
@@ -918,7 +996,7 @@ fn fetch_genicam_xml(port: &ControlPort, url_addr: u32) -> Result<Arc<[u8]>> {
 fn negotiate_packet_size(
     port: &ControlPort,
     device_ip: IpAddr,
-    socket: &snare::net::UdpSocket,
+    socket: &std::net::UdpSocket,
     scps_addr: u32,
 ) -> Result<u16> {
     // Probes are 16-aligned: devices round requests down to their own
@@ -964,8 +1042,7 @@ fn negotiate_packet_size(
 
     let mut best = 0u16;
     let size = if let Some(a) = probe(MAX) {
-        best = a;
-        MAX
+        a
     } else if let Some(mut good) = [1488u16, 1008, MIN].into_iter().find(|&c| match probe(c) {
         Some(a) => {
             best = best.max(a);
@@ -991,7 +1068,7 @@ fn negotiate_packet_size(
         tracing::warn!("packet size fire-test unsupported, falling back to 1500");
         1500
     };
-    let size = size.max(best).max(MIN);
+    let size = size.max(MIN);
 
     port.write_register(scps_addr, u32::from(size))
         .wait_timeout(budget)

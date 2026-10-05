@@ -1,0 +1,2 @@
+# Stub-only module: option type aliases with no runtime counterpart.
+telegenic._options
