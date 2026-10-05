@@ -55,4 +55,4 @@ jobs:
         run: cargo clippy --target ${{ matrix.platform.target }} -F py -- -D warnings
 
       - name: Tests
-        run: cargo test --target ${{ matrix.platform.target }}
+        run: cargo test --target ${{ matrix.platform.target }} --features emulator

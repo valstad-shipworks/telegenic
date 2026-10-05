@@ -25,7 +25,7 @@ use common::{
     ACQ_REG, Camera, CameraSpec, DEVICE_IP, HOST_IP, Pending, assert_costs, assert_within, config,
     sim, sim_with,
 };
-use snare::{IpNet, NicSpec, Privileges, SocketEntry, SocketKind};
+use snare::{IpNet, NicSpec, SocketEntry, SocketKind};
 use telegenic::emulator;
 use telegenic::fast_talker::rt::QosClass;
 use telegenic::gige::discovery::{self, DiscoveryConfig};
@@ -283,22 +283,19 @@ fn an_unknown_bind_device_fails_connect_cleanly() {
     });
 }
 
+/// A stream thread option an unprivileged process cannot apply. macOS
+/// applies, clamps or reports every thread option, so it has none.
+#[cfg(not(target_os = "macos"))]
 fn refusing_stream_thread() -> Vec<ThreadOption> {
-    if cfg!(target_os = "macos") {
-        vec![
-            ThreadOption::RtPriority(50),
-            ThreadOption::MacOsQos(QosClass::UserInteractive),
-        ]
-    } else {
-        vec![ThreadOption::RtPriority(50)]
-    }
+    vec![ThreadOption::RtPriority(50)]
 }
 
 /// A stream thread option the OS refuses fails `open_stream` with the OS
 /// error instead of starting a worker without it.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_stream_thread_option_the_os_refuses_fails_open() {
-    let sim = sim_with(5, |b| b.privileges(Privileges::none()));
+    let sim = sim_with(5, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let cam = connected(config(2));
@@ -322,9 +319,10 @@ fn a_stream_thread_option_the_os_refuses_fails_open() {
 
 /// The device must not be left streaming at a socket that is gone: an open
 /// that fails after pointing SCDA/SCP at its socket closes the channel again.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_failed_stream_open_closes_the_channel_on_the_device() {
-    let sim = sim_with(6, |b| b.privileges(Privileges::none()));
+    let sim = sim_with(6, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let cam = connected(config(2));
@@ -402,7 +400,7 @@ fn blocking_calls_return_the_transaction_error_unchanged() {
 /// traffic and leaves no socket behind.
 #[test]
 fn a_control_thread_option_the_os_refuses_fails_connect() {
-    let sim = sim_with(7, |b| b.privileges(Privileges::none()));
+    let sim = sim_with(7, |b| b.privileges(snare::Privileges::none()));
     sim.run(|| {
         let device = Camera::spawn();
         let mut cam = GigECamera::with_config(GigeConfig {
