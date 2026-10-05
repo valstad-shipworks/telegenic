@@ -130,11 +130,11 @@ cam = telegenic.Camera("10.0.0.210")
 cam.connect()
 cam.set_float("ExposureTime", 5000.0)
 
-with cam.snapshot_session() as session:   # camera idle between snaps
+with cam.snapshot_session() as session:  # camera idle between snaps
     frame = session.snap(timeout=5.0)
     print(frame.width, frame.height, frame.pixel_format)
 
-with cam.start_acquisition() as acq:   # stops the camera again on exit
+with cam.start_acquisition() as acq:  # stops the camera again on exit
     for _ in range(100):
         frame = acq.wait_for(timeout=1.0)
         if frame is not None:

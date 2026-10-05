@@ -24,10 +24,9 @@ parsed from the device's own description XML. Typical use::
                 print(frame)
 """
 
-from __future__ import annotations
-
 import enum
-from typing import Iterator, final
+from collections.abc import Iterator
+from typing import final
 
 from ._options import SocketOptionsLike, ThreadOptionsLike
 
