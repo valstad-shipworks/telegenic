@@ -65,9 +65,11 @@ Underneath sits the GigE Vision backend:
 ## Real-time tuning
 
 `GigeConfig` and `StreamConfig` take [fast-talker](https://docs.rs/fast-talker)
-option lists, re-exported as `telegenic::{ThreadOption, SocketOption}`. All
-are empty by default except `StreamConfig::stream_socket`, which requests an
-8 MiB receive buffer so a full frame's burst fits between two worker wakeups.
+option lists, re-exported as `telegenic::{ThreadOption, SocketOption}`, all
+empty by default. The GVSP socket always gets an 8 MiB receive buffer, so a
+full frame's burst fits between two worker wakeups, unless
+`StreamConfig::stream_socket` sets its own `RecvBuffer`; its other options
+are applied on top of that default rather than replacing it.
 
 ```rust no_run
 use telegenic::gige::GigeConfig;
@@ -92,7 +94,7 @@ let acq = cam.start_acquisition(stream)?;
 | `GigeConfig::thread` | the GVCP control worker, by itself during `connect` | `CpuAffinity`, `PrefaultStack`, `LinuxNice`, `UnixScheduler(Other \| Batch \| Idle)`, `WinPriority` below `TimeCritical`, `WinDisablePowerThrottling`, `MacOsQos` | `RtPriority`, `UnixScheduler(Fifo \| RoundRobin)`, `WinPriority(TimeCritical)`, `WinMmcss`, `MacOsTimeConstraint`: a real-time class on a thread that blocks on slow request/response round-trips only risks starving the rest of the system |
 | `GigeConfig::control_socket` | the GVCP socket, right after bind | `RecvBuffer`, `BindDevice`, `Dscp`, `LinuxPriority` | the busy-poll options burn a core on a slow loop; `SendBuffer`, `DontFragment` and `WinCpuAffinity` don't help a request/response socket |
 | `StreamConfig::thread` | the GVSP stream worker, by itself before the stream opens | every `ThreadOption` except the one refused | `MacOsTimeConstraint`: it reserves a fixed computation slice per period, and the worker is a receive loop with no host-owned period |
-| `StreamConfig::stream_socket` | the GVSP socket, right after bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send |
+| `StreamConfig::stream_socket` | the GVSP socket, right after bind | `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`, `LinuxBusyPollBudget` | `SendBuffer`, `DontFragment`, `Dscp`, `LinuxPriority` only shape traffic this receive-only socket doesn't send; Windows only takes `WinCpuAffinity` before bind |
 
 A refused option, or one that fails to apply (e.g. `RtPriority` without
 `CAP_SYS_NICE`), makes `connect` (or opening the stream) fail. Options for

@@ -71,17 +71,19 @@ pub struct StreamConfig {
     /// are the application's to make, with
     /// [`ProcessOption::apply_all`](fast_talker::options::ProcessOption::apply_all).
     pub thread: Vec<ThreadOption>,
-    /// Options for the GVSP socket, applied right after bind. Defaults to
-    /// [`DEFAULT_STREAM_RECV_BUFFER`] of receive buffer, so a burst of a
-    /// full frame fits between two worker wakeups. Accepted: `RecvBuffer`,
-    /// `BindDevice`, `LinuxBusyPoll`, `LinuxPreferBusyPoll`,
-    /// `LinuxBusyPollBudget`, `WinCpuAffinity`. Refused: `SendBuffer`,
+    /// Options for the GVSP socket, applied right after bind, after a
+    /// [`DEFAULT_STREAM_RECV_BUFFER`] receive buffer so a burst of a full
+    /// frame fits between two worker wakeups. A `RecvBuffer` here replaces
+    /// that default. Accepted: `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`,
+    /// `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`. Refused: `SendBuffer`,
     /// `DontFragment`, `Dscp` and `LinuxPriority`, which only shape traffic
-    /// this socket doesn't send.
+    /// this socket doesn't send, and `WinCpuAffinity`, which Windows only
+    /// takes before bind.
     pub stream_socket: Vec<SocketOption>,
 }
 
-/// The receive buffer [`StreamConfig::stream_socket`] requests by default.
+/// The receive buffer the GVSP socket gets unless
+/// [`StreamConfig::stream_socket`] sets its own.
 /// Linux caps it at `net.core.rmem_max` unless the process has
 /// `CAP_NET_ADMIN`.
 pub const DEFAULT_STREAM_RECV_BUFFER: usize = 8 * 1024 * 1024;
@@ -107,8 +109,22 @@ impl StreamConfig {
             packet_request_ratio: 0.25,
             local_addr: None,
             thread: Vec::new(),
-            stream_socket: vec![SocketOption::RecvBuffer(DEFAULT_STREAM_RECV_BUFFER)],
+            stream_socket: Vec::new(),
         }
+    }
+
+    /// `stream_socket` as applied: [`DEFAULT_STREAM_RECV_BUFFER`] first
+    /// unless it sets its own `RecvBuffer`.
+    pub(crate) fn stream_socket_options(&self) -> Vec<SocketOption> {
+        let own_buffer = self
+            .stream_socket
+            .iter()
+            .any(|o| matches!(o, SocketOption::RecvBuffer(_)));
+        let default = (!own_buffer).then_some(SocketOption::RecvBuffer(DEFAULT_STREAM_RECV_BUFFER));
+        default
+            .into_iter()
+            .chain(self.stream_socket.iter().cloned())
+            .collect()
     }
 
     /// Register block base for this config's channel.
@@ -259,5 +275,41 @@ impl Drop for StreamChannel {
         let _ = self.to_worker.send(runner::ToStreamWorker::Shutdown);
         self.thread.wake().ok();
         // ThreadHandle::drop joins the worker.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_receive_buffer_is_added_to_other_options() {
+        let cfg = StreamConfig {
+            stream_socket: vec![SocketOption::LinuxBusyPoll(50)],
+            ..StreamConfig::new()
+        };
+        assert_eq!(
+            cfg.stream_socket_options(),
+            [
+                SocketOption::RecvBuffer(DEFAULT_STREAM_RECV_BUFFER),
+                SocketOption::LinuxBusyPoll(50),
+            ]
+        );
+        assert_eq!(
+            StreamConfig::new().stream_socket_options(),
+            [SocketOption::RecvBuffer(DEFAULT_STREAM_RECV_BUFFER)]
+        );
+    }
+
+    #[test]
+    fn own_receive_buffer_replaces_the_default() {
+        let cfg = StreamConfig {
+            stream_socket: vec![
+                SocketOption::LinuxBusyPoll(50),
+                SocketOption::RecvBuffer(1 << 20),
+            ],
+            ..StreamConfig::new()
+        };
+        assert_eq!(cfg.stream_socket_options(), cfg.stream_socket);
     }
 }

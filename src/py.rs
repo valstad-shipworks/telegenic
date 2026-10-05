@@ -74,9 +74,7 @@ fn build_stream_config(
 ) -> StreamConfig {
     let mut cfg = StreamConfig::new();
     cfg.thread = thread.unwrap_or_default().0;
-    if let Some(options) = stream_socket {
-        cfg.stream_socket = options.0;
-    }
+    cfg.stream_socket = stream_socket.unwrap_or_default().0;
     cfg.channel = channel;
     cfg.n_buffers = n_buffers;
     if let Some(size) = packet_size {

@@ -612,7 +612,11 @@ impl GigECamera {
             None => SocketAddr::new(advertised_host_ip(conn)?, 0),
         };
         let socket = std::net::UdpSocket::bind(local)?;
-        tuning::apply_socket(SocketRole::UdpStreamRx, &socket, &cfg.stream_socket)?;
+        tuning::apply_socket(
+            SocketRole::UdpStreamRx,
+            &socket,
+            &cfg.stream_socket_options(),
+        )?;
         let bound = socket.local_addr()?;
         let IpAddr::V4(host_v4) = bound.ip() else {
             return Err(CameraError::Unsupported("IPv6 stream destinations"));

@@ -227,11 +227,12 @@ class Camera:
             ``macos_time_constraint`` is accepted. Options for another
             platform, or that this one cannot do, are skipped with a warning.
         :param stream_socket: Options for the GVSP socket, applied right
-            after bind; ``None`` keeps the default 8 MiB ``recv_buffer``.
-            Accepted: ``recv_buffer``, ``bind_device``, the
-            ``linux_busy_poll`` trio and ``win_cpu_affinity``.
-            ``send_buffer``, ``dont_fragment``, ``dscp`` and
-            ``linux_priority`` are refused.
+            after bind, after a default 8 MiB ``recv_buffer`` that a
+            ``recv_buffer`` here replaces. Accepted: ``recv_buffer``,
+            ``bind_device`` and the ``linux_busy_poll`` trio.
+            ``send_buffer``, ``dont_fragment``, ``dscp``,
+            ``linux_priority`` and ``win_cpu_affinity`` (Windows only takes
+            it before bind) are refused.
         :raises ValueError: while another acquisition or snapshot session
             is active.
         """

@@ -513,15 +513,23 @@ fn full_frame(stream_socket: Vec<SocketOption>) -> (FrameStatus, u64, u64) {
 
 /// A full-resolution frame arrives as one 900-packet burst before the
 /// worker can read any of it: the default 8 MiB receive buffer holds it
-/// all, a 64 KiB one overflows and loses the frame.
+/// all, even alongside other socket options, and a 64 KiB one overflows and
+/// loses the frame.
 #[test]
 fn the_default_receive_buffer_holds_a_full_frame_burst() {
     let packets = 2 + (FULL_WIDTH * FULL_HEIGHT).div_ceil(1500 - 36) as u64;
-    let (status, overflowed, received) = full_frame(StreamConfig::new().stream_socket);
-    assert_eq!(
-        (status, overflowed, received),
-        (FrameStatus::Complete, 0, packets)
-    );
+    for stream_socket in [
+        StreamConfig::new().stream_socket,
+        vec![SocketOption::LinuxBusyPoll(50)],
+    ] {
+        let what = format!("{stream_socket:?}");
+        let (status, overflowed, received) = full_frame(stream_socket);
+        assert_eq!(
+            (status, overflowed, received),
+            (FrameStatus::Complete, 0, packets),
+            "{what}"
+        );
+    }
 
     let (status, overflowed, received) = full_frame(vec![SocketOption::RecvBuffer(64 * 1024)]);
     assert_ne!(status, FrameStatus::Complete);

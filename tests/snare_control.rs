@@ -134,6 +134,10 @@ fn refused_options_fail_before_any_traffic() {
                 ..stream_config()
             },
             StreamConfig {
+                stream_socket: vec![SocketOption::WinCpuAffinity(0)],
+                ..stream_config()
+            },
+            StreamConfig {
                 thread: vec![ThreadOption::MacOsTimeConstraint {
                     period_us: 1000,
                     computation_us: 100,
@@ -166,7 +170,7 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
                 ThreadOption::WinDisablePowerThrottling,
             ],
             vec![],
-            vec![SocketOption::WinCpuAffinity(1)],
+            vec![],
         )
     } else {
         (
@@ -175,10 +179,7 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
                 ThreadOption::WinDisablePowerThrottling,
             ],
             vec![SocketOption::LinuxPriority(4)],
-            vec![
-                SocketOption::LinuxBusyPoll(50),
-                SocketOption::WinCpuAffinity(1),
-            ],
+            vec![SocketOption::LinuxBusyPoll(50)],
         )
     }
 }

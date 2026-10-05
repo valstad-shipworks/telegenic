@@ -81,7 +81,6 @@ pub(crate) fn socket_allowed(role: SocketRole, o: &SocketOption) -> bool {
                 | SocketOption::LinuxBusyPoll(_)
                 | SocketOption::LinuxPreferBusyPoll(_)
                 | SocketOption::LinuxBusyPollBudget(_)
-                | SocketOption::WinCpuAffinity(_)
         ),
         SocketRole::UdpControl => matches!(
             o,
@@ -238,6 +237,10 @@ mod tests {
         assert!(!socket_allowed(
             SocketRole::UdpStreamRx,
             &SocketOption::Dscp(46)
+        ));
+        assert!(!socket_allowed(
+            SocketRole::UdpStreamRx,
+            &SocketOption::WinCpuAffinity(0)
         ));
         assert!(socket_allowed(
             SocketRole::UdpControl,
