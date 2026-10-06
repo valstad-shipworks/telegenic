@@ -6,7 +6,7 @@
 //! block-size math matches the generator's.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",

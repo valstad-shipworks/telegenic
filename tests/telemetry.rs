@@ -3,7 +3,7 @@
 //! stream socket — each inside a deterministic snare simulation.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",

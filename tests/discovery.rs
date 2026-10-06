@@ -5,7 +5,7 @@
 //! loopback — the discovery socket sends to whatever `broadcast` it is given.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",

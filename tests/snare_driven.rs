@@ -5,7 +5,7 @@
 //! and the driver's own deliberate waits.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",
@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use common::{
     Camera, DEVICE_IP, DEVICE_MAC, EXPOSURE, HOST_IP, assert_costs, config, image, sim, unix_ns,
 };
-use snare::{NicSpec, Sim};
+use snare::prelude::*;
 use telegenic::gige::GigECamera;
 use telegenic::gige::discovery::{self, DiscoveryConfig};
 use telegenic::gige::proto::gvcp::GVCP_PORT;

@@ -4,6 +4,7 @@
 //! frames, and replays cached packets on resend requests. The suites run it
 //! inside a deterministic snare simulation, so every wait is virtual time.
 
+#![cfg(snare)]
 #![allow(dead_code)]
 
 use std::net::{SocketAddr, UdpSocket};
@@ -485,7 +486,8 @@ fn serve(
             Ok(v) => v,
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::ConnectionReset =>
             {
                 continue;
             }

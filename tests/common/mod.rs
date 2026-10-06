@@ -2,16 +2,18 @@
 //! the faults a real link and a real device produce, and the sim and config
 //! builders the snare-driven suites share.
 
+#![cfg(snare)]
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use snare::{IpNet, NicSpec, Sim, SimBuilder, UdpPolicy};
+use snare::prelude::*;
 use telegenic::emulator::{self, DeviceConfig, GigeDevice, ResendRequest};
 use telegenic::gige::GigeConfig;
 use telegenic::gige::proto::gvcp::{self, GVCP_PORT};
@@ -284,7 +286,13 @@ impl Camera {
                 .spawn(move || {
                     let mut buf = [0u8; 0xffff];
                     loop {
-                        let (n, src) = control.recv_from(&mut buf).unwrap();
+                        // Windows reports an ICMP port unreachable for an
+                        // earlier ack on the next receive; a device ignores it.
+                        let (n, src) = match control.recv_from(&mut buf) {
+                            Ok(r) => r,
+                            Err(e) if e.kind() == ErrorKind::ConnectionReset => continue,
+                            Err(e) => panic!("gvcp recv: {e}"),
+                        };
                         if &buf[..n] == QUIT {
                             return;
                         }

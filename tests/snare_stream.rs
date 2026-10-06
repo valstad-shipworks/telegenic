@@ -4,7 +4,7 @@
 //! sizing and a camera vanishing mid-frame, against an emulated camera.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",

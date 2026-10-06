@@ -4,7 +4,7 @@
 //! emulated camera with fault knobs.
 
 #![cfg(all(
-    unix,
+    snare,
     any(
         all(
             target_os = "linux",
@@ -25,7 +25,8 @@ use common::{
     ACQ_REG, Camera, CameraSpec, DEVICE_IP, HOST_IP, Pending, assert_costs, assert_within, config,
     sim,
 };
-use snare::{IpNet, NicSpec, SocketEntry, SocketKind};
+use snare::SocketEntry;
+use snare::prelude::*;
 use telegenic::emulator;
 use telegenic::fast_talker::rt::QosClass;
 use telegenic::gige::discovery::{self, DiscoveryConfig};
@@ -158,6 +159,15 @@ fn foreign_options() -> (Vec<ThreadOption>, Vec<SocketOption>, Vec<SocketOption>
             ],
             vec![],
             vec![SocketOption::WinCpuAffinity(1)],
+        )
+    } else if cfg!(windows) {
+        (
+            vec![
+                ThreadOption::LinuxNice(5),
+                ThreadOption::MacOsQos(QosClass::UserInteractive),
+            ],
+            vec![SocketOption::LinuxPriority(4)],
+            vec![SocketOption::LinuxBusyPoll(50)],
         )
     } else {
         (
@@ -301,16 +311,16 @@ fn an_unknown_bind_device_fails_connect_cleanly() {
     });
 }
 
-/// A stream thread option an unprivileged process cannot apply. macOS
-/// applies, clamps or reports every thread option, so it has none.
-#[cfg(not(target_os = "macos"))]
+/// A stream thread option an unprivileged process cannot apply. macOS and
+/// Windows apply, clamp or report every thread option, so they have none.
+#[cfg(target_os = "linux")]
 fn refusing_stream_thread() -> Vec<ThreadOption> {
     vec![ThreadOption::RtPriority(50)]
 }
 
 /// A stream thread option the OS refuses fails `open_stream` with the OS
 /// error instead of starting a worker without it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn a_stream_thread_option_the_os_refuses_fails_open() {
     let sim = common::sim_with(5, |b| b.privileges(snare::Privileges::none()));
@@ -337,7 +347,7 @@ fn a_stream_thread_option_the_os_refuses_fails_open() {
 
 /// The device must not be left streaming at a socket that is gone: an open
 /// that fails after pointing SCDA/SCP at its socket closes the channel again.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[test]
 fn a_failed_stream_open_closes_the_channel_on_the_device() {
     let sim = common::sim_with(6, |b| b.privileges(snare::Privileges::none()));
@@ -466,6 +476,30 @@ fn lost_commands_are_retransmitted_under_their_request_id() {
         let stats = cam.stats().unwrap();
         assert_eq!((stats.retries, stats.timeouts), (2, 0));
         assert_eq!(cam.link_stats().gvcp_retransmits, 2);
+        drop(cam);
+        device.stop();
+    });
+}
+
+/// A port unreachable reported on the control socket (WSAECONNRESET on the
+/// next receive on Windows, ECONNREFUSED on a connected socket) does not
+/// stop the worker from hearing the acknowledges that follow.
+#[test]
+fn a_port_unreachable_on_the_control_socket_does_not_deafen_it() {
+    sim(10).run(|| {
+        let device = Camera::spawn();
+        let cam = connected(bound_config(4));
+        snare::inject_icmp_port_unreachable(
+            control_addr(),
+            SocketAddr::new(DEVICE_IP.into(), gvcp::GVCP_PORT),
+        );
+        for value in [1, 2] {
+            cam.write_register(PROBE_REG, value)
+                .unwrap()
+                .wait()
+                .unwrap();
+            assert_eq!(cam.read_register(PROBE_REG).unwrap().wait().unwrap(), value);
+        }
         drop(cam);
         device.stop();
     });
@@ -741,8 +775,11 @@ fn link_down_loses_control_and_link_up_lets_it_reconnect() {
         let device = Camera::spawn();
         let mut cam = connected(config(2));
         std::thread::sleep(Duration::from_millis(2500));
+        let heard = device.log().datagrams;
         snare::set_link("eth0", false).unwrap();
         wait_disconnected(&cam, Duration::from_secs(10));
+        assert_eq!(device.log().datagrams, heard);
+        #[cfg(unix)]
         assert!(snare::nic_counters("eth0").unwrap().tx_carrier_errors >= 3);
 
         let t0 = Instant::now();
