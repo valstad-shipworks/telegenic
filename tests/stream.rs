@@ -7,7 +7,6 @@
 
 #![cfg(all(
     snare,
-    unix,
     any(
         all(
             target_os = "linux",

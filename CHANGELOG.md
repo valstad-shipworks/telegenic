@@ -2,10 +2,20 @@
 
 ## 2.0.1 — 2026-10-06
 
-Tests only; the library is unchanged. The snare suites move to snare 3, which
-builds only under `--cfg snare`: they run with `cargo snare test`, and snare
-is a dev-dependency only under `cfg(snare)`, so plain `cargo test` no longer
-builds it.
+### Fixes
+
+- A port unreachable reported on the GVCP or GVSP socket (`WSAECONNRESET` on
+  the next receive on Windows, `ECONNREFUSED` on a connected socket) no longer
+  stops its worker from receiving: the receive loop logged the error and
+  returned before the socket would block, and readiness only re-arms after
+  that, so the control channel timed out and was lost.
+
+### Tests
+
+- The snare suites move to snare 3, which builds only under `--cfg snare`:
+  they run with `cargo snare test`, and snare is a dev-dependency only under
+  `cfg(snare)`, so plain `cargo test` no longer builds it.
+- They now also run on Windows.
 
 ## 2.0.0 — 2026-10-05
 

@@ -228,6 +228,18 @@ impl Runner {
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                // A port unreachable an earlier send drew, reported on this
+                // receive. The socket stays usable, and readiness only re-arms
+                // once a receive would block (mio on IOCP, edge-triggered epoll).
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tracing::debug!("gvcp recv error: {e}");
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!("gvcp recv error: {e}");
                     return;
