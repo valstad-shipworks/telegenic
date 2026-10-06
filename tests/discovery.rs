@@ -5,6 +5,7 @@
 //! loopback — the discovery socket sends to whatever `broadcast` it is given.
 
 #![cfg(all(
+    snare,
     unix,
     any(
         all(

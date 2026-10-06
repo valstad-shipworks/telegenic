@@ -4,6 +4,7 @@
 //! emulated camera with fault knobs.
 
 #![cfg(all(
+    snare,
     unix,
     any(
         all(
@@ -25,7 +26,8 @@ use common::{
     ACQ_REG, Camera, CameraSpec, DEVICE_IP, HOST_IP, Pending, assert_costs, assert_within, config,
     sim,
 };
-use snare::{IpNet, NicSpec, SocketEntry, SocketKind};
+use snare::SocketEntry;
+use snare::prelude::*;
 use telegenic::emulator;
 use telegenic::fast_talker::rt::QosClass;
 use telegenic::gige::discovery::{self, DiscoveryConfig};

@@ -2,6 +2,7 @@
 //! the faults a real link and a real device produce, and the sim and config
 //! builders the snare-driven suites share.
 
+#![cfg(snare)]
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use snare::{IpNet, NicSpec, Sim, SimBuilder, UdpPolicy};
+use snare::prelude::*;
 use telegenic::emulator::{self, DeviceConfig, GigeDevice, ResendRequest};
 use telegenic::gige::GigeConfig;
 use telegenic::gige::proto::gvcp::{self, GVCP_PORT};

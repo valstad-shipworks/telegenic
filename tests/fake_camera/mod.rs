@@ -4,6 +4,7 @@
 //! frames, and replays cached packets on resend requests. The suites run it
 //! inside a deterministic snare simulation, so every wait is virtual time.
 
+#![cfg(snare)]
 #![allow(dead_code)]
 
 use std::net::{SocketAddr, UdpSocket};

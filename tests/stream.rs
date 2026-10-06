@@ -6,6 +6,7 @@
 //! block-size math matches the generator's.
 
 #![cfg(all(
+    snare,
     unix,
     any(
         all(

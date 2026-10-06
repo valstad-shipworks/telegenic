@@ -4,6 +4,7 @@
 //! sizing and a camera vanishing mid-frame, against an emulated camera.
 
 #![cfg(all(
+    snare,
     unix,
     any(
         all(

@@ -2,6 +2,7 @@
 //! each inside a deterministic snare simulation.
 
 #![cfg(all(
+    snare,
     unix,
     any(
         all(
