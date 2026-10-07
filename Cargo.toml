@@ -10,6 +10,7 @@ documentation = "https://docs.rs/telegenic"
 readme = "README.md"
 keywords = ["python", "robotics", "genicam"]
 categories = ["science::robotics", "hardware-support", "network-programming"]
+exclude = ["tests/data/"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
