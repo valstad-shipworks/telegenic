@@ -4,7 +4,8 @@ Pure-Rust GenICam camera library.
 
 Transports are pluggable, but the only backend right now is GigE Vision
 (`telegenic::gige`), which speaks GVCP (control) and GVSP (streaming)
-directly over UDP.
+directly over UDP, with no vendor SDK. USB3 Vision and GenTL producers are
+not supported.
 
 ```rust no_run
 use telegenic::{GenICamera, StreamConfig};
@@ -176,12 +177,32 @@ cargo run --example grab <camera-ip> [n]      # stream n frames
 python examples/grab.py <camera-ip> [n]       # the same, via the bindings
 ```
 
+## Cargo features
+
+| Feature | Enables |
+|---|---|
+| `py` | the PyO3 bindings |
+| `abi3`, `abi3t` | `py` built against the stable ABI (`abi3-py310`, `abi3t-py315`) |
+| `emulator` | `telegenic::emulator`, a socket-agnostic GigE Vision device for tests and simulators |
+| `valuable` | `valuable::Valuable` on public data types and errors |
+| `async` | nothing extra; `recv_async` on frame and event channels is always available |
+
 ## Testing
 
-`cargo test` runs everything against an in-process fake camera over loopback
-UDP (`tests/fake_camera/`). It covers GVCP semantics (retries, pending-ack,
-control loss), discovery and Force IP, GVSP reassembly under packet loss,
-reordering, and duplication with resend replay, GenICam evaluation against
-the real Hikrobot and Imperx vendor XMLs in `tests/data/`, and the full
-`GenICamera` path including message-channel events and single-frame
-snapshots.
+`cargo test` runs the unit tests, proptest suites for the GVCP, GVSP and
+GenICam decoders, and GenICam node-graph evaluation against mock registers.
+The integration suites are built only under
+`cargo snare test --features emulator` (install with
+`cargo install cargo-snare`), which runs each one inside a deterministic
+[snare](https://docs.rs/snare) simulation on a virtual clock. They drive an
+in-process fake camera (`tests/fake_camera/`) and the `emulator` device over
+UDP, and cover GVCP semantics (retries, pending-ack, heartbeat and
+control loss, reconnects), discovery and Force IP, GVSP reassembly under
+packet loss, reordering, and duplication with resend replay, packet-size
+negotiation, and the full `GenICamera` path including message-channel
+events and single-frame snapshots. `fuzz/` holds cargo-fuzz targets, and
+`py_tests/` the pytest suite for the bindings (no camera needed).
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
