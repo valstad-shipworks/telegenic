@@ -3,18 +3,7 @@
 //! graph against live registers, and acquisition wires PayloadSize into the
 //! stream — each inside a deterministic snare simulation.
 
-#![cfg(all(
-    snare,
-    any(
-        all(
-            target_os = "linux",
-            target_env = "gnu",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos",
-        windows
-    )
-))]
+#![cfg(snare)]
 
 mod fake_camera;
 
