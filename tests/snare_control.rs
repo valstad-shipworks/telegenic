@@ -220,10 +220,13 @@ fn options_for_another_platform_are_skipped() {
 #[test]
 fn an_unbound_control_socket_streams_to_the_host_address() {
     sim(4).run(|| {
-        let _device = Camera::spawn();
+        let device = Camera::spawn();
         let cam = connected(config(2));
         let stream = cam.open_stream(stream_config()).expect("open stream");
         assert_eq!(stream.local_addr().ip(), IpAddr::V4(HOST_IP));
+        drop(stream);
+        drop(cam);
+        device.stop();
     });
 }
 
@@ -768,7 +771,6 @@ fn link_down_loses_control_and_link_up_lets_it_reconnect() {
         snare::set_link("eth0", false).unwrap();
         wait_disconnected(&cam, Duration::from_secs(10));
         assert_eq!(device.log().datagrams, heard);
-        #[cfg(unix)]
         assert!(snare::nic_counters("eth0").unwrap().tx_carrier_errors >= 3);
 
         let t0 = Instant::now();
@@ -986,6 +988,7 @@ fn concurrent_callers_share_one_transaction_in_flight() {
             "one latency per transaction",
         );
         let mut sorted = ids.clone();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "request ids repeat: {ids:?}");
         assert!(
