@@ -771,6 +771,9 @@ fn link_down_loses_control_and_link_up_lets_it_reconnect() {
         snare::set_link("eth0", false).unwrap();
         wait_disconnected(&cam, Duration::from_secs(10));
         assert_eq!(device.log().datagrams, heard);
+        // Windows withdraws a disconnected adapter's routes, so its sends fail unreachable instead
+        // of leaving as carrier errors.
+        #[cfg(unix)]
         assert!(snare::nic_counters("eth0").unwrap().tx_carrier_errors >= 3);
 
         let t0 = Instant::now();
