@@ -2,18 +2,7 @@
 //! GVCP transactions and events on the control socket, GVSP datagrams on the
 //! stream socket — each inside a deterministic snare simulation.
 
-#![cfg(all(
-    snare,
-    any(
-        all(
-            target_os = "linux",
-            target_env = "gnu",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos",
-        windows
-    )
-))]
+#![cfg(snare)]
 
 mod fake_camera;
 

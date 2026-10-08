@@ -3,18 +3,7 @@
 //! acknowledges, concurrent callers, reconnects and discovery, against an
 //! emulated camera with fault knobs.
 
-#![cfg(all(
-    snare,
-    any(
-        all(
-            target_os = "linux",
-            target_env = "gnu",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos",
-        windows
-    )
-))]
+#![cfg(snare)]
 
 mod common;
 
@@ -231,10 +220,13 @@ fn options_for_another_platform_are_skipped() {
 #[test]
 fn an_unbound_control_socket_streams_to_the_host_address() {
     sim(4).run(|| {
-        let _device = Camera::spawn();
+        let device = Camera::spawn();
         let cam = connected(config(2));
         let stream = cam.open_stream(stream_config()).expect("open stream");
         assert_eq!(stream.local_addr().ip(), IpAddr::V4(HOST_IP));
+        drop(stream);
+        drop(cam);
+        device.stop();
     });
 }
 
@@ -779,6 +771,8 @@ fn link_down_loses_control_and_link_up_lets_it_reconnect() {
         snare::set_link("eth0", false).unwrap();
         wait_disconnected(&cam, Duration::from_secs(10));
         assert_eq!(device.log().datagrams, heard);
+        // Windows withdraws a disconnected adapter's routes, so its sends fail unreachable instead
+        // of leaving as carrier errors.
         #[cfg(unix)]
         assert!(snare::nic_counters("eth0").unwrap().tx_carrier_errors >= 3);
 
@@ -997,6 +991,7 @@ fn concurrent_callers_share_one_transaction_in_flight() {
             "one latency per transaction",
         );
         let mut sorted = ids.clone();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "request ids repeat: {ids:?}");
         assert!(
