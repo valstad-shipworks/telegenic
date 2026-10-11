@@ -128,7 +128,9 @@ impl GigeDevice {
         self.write_reg(bootstrap::VERSION, 0x0002_0000);
         self.write_reg(
             bootstrap::GVCP_CAPABILITY,
-            bootstrap::CAP_WRITE_MEMORY | bootstrap::CAP_HEARTBEAT_DISABLE,
+            bootstrap::CAP_WRITE_MEMORY
+                | bootstrap::CAP_CONCATENATION
+                | bootstrap::CAP_HEARTBEAT_DISABLE,
         );
         self.write_reg(bootstrap::HEARTBEAT_TIMEOUT, 3000);
         self.write_reg(bootstrap::N_STREAM_CHANNELS, 1);
@@ -232,6 +234,19 @@ impl GigeDevice {
             caps | bootstrap::CAP_PACKET_RESEND
         } else {
             caps & !bootstrap::CAP_PACKET_RESEND
+        };
+        self.write_reg(bootstrap::GVCP_CAPABILITY, caps);
+    }
+
+    /// Advertises (or withdraws) concatenation. The device answers
+    /// multi-register READREG/WRITEREG either way; withdrawn, a client sends
+    /// one register per command.
+    pub fn set_concatenation(&mut self, supported: bool) {
+        let caps = self.read_reg(bootstrap::GVCP_CAPABILITY);
+        let caps = if supported {
+            caps | bootstrap::CAP_CONCATENATION
+        } else {
+            caps & !bootstrap::CAP_CONCATENATION
         };
         self.write_reg(bootstrap::GVCP_CAPABILITY, caps);
     }
