@@ -59,9 +59,14 @@ enum Op {
     ReadReg(ResponseHandle<u32>),
     ReadRegs {
         handle: ResponseHandle<Vec<u32>>,
-        count: usize,
+        addrs: Vec<u32>,
+        acc: Vec<u32>,
     },
-    WriteRegs(ResponseHandle<()>),
+    WriteRegs {
+        handle: ResponseHandle<()>,
+        pairs: Vec<(u32, u32)>,
+        done: usize,
+    },
     ReadMem {
         handle: ResponseHandle<Vec<u8>>,
         acc: Vec<u8>,
@@ -82,7 +87,7 @@ impl Op {
         match self {
             Op::ReadReg(h) => h.fail(err),
             Op::ReadRegs { handle, .. } => handle.fail(err),
-            Op::WriteRegs(h) => h.fail(err),
+            Op::WriteRegs { handle, .. } => handle.fail(err),
             Op::ReadMem { handle, .. } => handle.fail(err),
             Op::WriteMem { handle, .. } => handle.fail(err),
             Op::Heartbeat => {}
@@ -92,7 +97,7 @@ impl Op {
     fn expected_ack(&self) -> u16 {
         match self {
             Op::ReadReg(_) | Op::ReadRegs { .. } | Op::Heartbeat => gvcp::READ_REGISTER_ACK,
-            Op::WriteRegs(_) => gvcp::WRITE_REGISTER_ACK,
+            Op::WriteRegs { .. } => gvcp::WRITE_REGISTER_ACK,
             Op::ReadMem { .. } => gvcp::READ_MEMORY_ACK,
             Op::WriteMem { .. } => gvcp::WRITE_MEMORY_ACK,
         }
@@ -131,7 +136,8 @@ pub(crate) struct Runner {
 /// What to encode when an op reaches the head of the queue.
 enum PendingSend {
     ReadRegs(Vec<u32>),
-    WriteRegs(Vec<(u32, u32)>),
+    ReadRegsChunk,
+    WriteRegsChunk,
     ReadMemChunk,
     WriteMemChunk,
 }
@@ -306,18 +312,43 @@ impl Runner {
                 Some(v) => handle.fulfill(Ok(v)),
                 None => handle.fail(CameraError::Protocol("empty read register ack".into())),
             },
-            Op::ReadRegs { handle, count } => {
-                let values: Vec<u32> = ack.register_values().collect();
-                if values.len() == count {
-                    handle.fulfill(Ok(values));
-                } else {
+            Op::ReadRegs {
+                handle,
+                addrs,
+                mut acc,
+            } => {
+                let want = self.regs_per_command(addrs.len() - acc.len());
+                let before = acc.len();
+                acc.extend(ack.register_values());
+                let got = acc.len() - before;
+                if got != want {
                     handle.fail(CameraError::Protocol(format!(
-                        "read register ack carried {} values, expected {count}",
-                        values.len()
+                        "read register ack carried {got} values, expected {want}"
                     )));
+                } else if acc.len() == addrs.len() {
+                    handle.fulfill(Ok(acc));
+                } else {
+                    let op = Op::ReadRegs { handle, addrs, acc };
+                    self.continue_op(op, PendingSend::ReadRegsChunk);
                 }
             }
-            Op::WriteRegs(handle) => handle.fulfill(Ok(())),
+            Op::WriteRegs {
+                handle,
+                pairs,
+                mut done,
+            } => {
+                done += self.regs_per_command(pairs.len() - done);
+                if done >= pairs.len() {
+                    handle.fulfill(Ok(()));
+                } else {
+                    let op = Op::WriteRegs {
+                        handle,
+                        pairs,
+                        done,
+                    };
+                    self.continue_op(op, PendingSend::WriteRegsChunk);
+                }
+            }
             Op::ReadMem {
                 handle,
                 mut acc,
@@ -415,11 +446,20 @@ impl Runner {
                     self.enqueue(Op::ReadReg(handle), PendingSend::ReadRegs(vec![addr]));
                 }
                 Ok(ToWorker::ReadRegs(addrs, handle)) => {
-                    let count = addrs.len();
-                    self.enqueue(Op::ReadRegs { handle, count }, PendingSend::ReadRegs(addrs));
+                    let op = Op::ReadRegs {
+                        handle,
+                        acc: Vec::with_capacity(addrs.len()),
+                        addrs,
+                    };
+                    self.enqueue(op, PendingSend::ReadRegsChunk);
                 }
                 Ok(ToWorker::WriteRegs(pairs, handle)) => {
-                    self.enqueue(Op::WriteRegs(handle), PendingSend::WriteRegs(pairs));
+                    let op = Op::WriteRegs {
+                        handle,
+                        pairs,
+                        done: 0,
+                    };
+                    self.enqueue(op, PendingSend::WriteRegsChunk);
                 }
                 Ok(ToWorker::ReadMem { addr, len, handle }) => {
                     let op = Op::ReadMem {
@@ -451,7 +491,7 @@ impl Runner {
         self.queued_payloads.push_back(send);
     }
 
-    /// Send the next chunk of a multi-transaction memory op, letting a due
+    /// Send the next chunk of a multi-transaction op, letting a due
     /// heartbeat cut in at the chunk boundary — a long transfer (e.g. the
     /// GenICam XML fetch) must not hold the device's heartbeat window shut.
     fn continue_op(&mut self, op: Op, send: PendingSend) {
@@ -460,6 +500,16 @@ impl Runner {
             self.queued_payloads.insert(1, send);
         } else {
             self.send_op(op, send);
+        }
+    }
+
+    /// Registers the next READREG/WRITEREG of a register op carries: all of
+    /// them when the device accepts concatenation, otherwise one.
+    fn regs_per_command(&self, remaining: usize) -> usize {
+        if self.shared.concatenation() {
+            remaining
+        } else {
+            remaining.min(1)
         }
     }
 
@@ -480,7 +530,14 @@ impl Runner {
         let id = self.next_id;
         let datagram = match (&op, send) {
             (_, PendingSend::ReadRegs(addrs)) => gvcp::encode_read_reg(&addrs, id),
-            (_, PendingSend::WriteRegs(pairs)) => gvcp::encode_write_reg(&pairs, id),
+            (Op::ReadRegs { addrs, acc, .. }, PendingSend::ReadRegsChunk) => {
+                let take = self.regs_per_command(addrs.len() - acc.len());
+                gvcp::encode_read_reg(&addrs[acc.len()..acc.len() + take], id)
+            }
+            (Op::WriteRegs { pairs, done, .. }, PendingSend::WriteRegsChunk) => {
+                let take = self.regs_per_command(pairs.len() - done);
+                gvcp::encode_write_reg(&pairs[*done..done + take], id)
+            }
             (
                 Op::ReadMem {
                     acc,
@@ -510,7 +567,13 @@ impl Runner {
                     id,
                 )
             }
-            (_, PendingSend::ReadMemChunk | PendingSend::WriteMemChunk) => {
+            (
+                _,
+                PendingSend::ReadRegsChunk
+                | PendingSend::WriteRegsChunk
+                | PendingSend::ReadMemChunk
+                | PendingSend::WriteMemChunk,
+            ) => {
                 op.fail(CameraError::Protocol("internal op/payload mismatch".into()));
                 return;
             }

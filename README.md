@@ -175,6 +175,7 @@ cargo run --example info <camera-ip>          # identity + GenICam URL
 cargo run --example snap <camera-ip> [n]      # n on-demand single frames
 cargo run --example grab <camera-ip> [n]      # stream n frames
 python examples/grab.py <camera-ip> [n]       # the same, via the bindings
+cargo run --release --example live <camera-ip> [max-packet] # live view, camera settings untouched
 ```
 
 ## Cargo features

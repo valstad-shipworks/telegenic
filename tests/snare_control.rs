@@ -937,6 +937,42 @@ fn a_mismatched_ack_fails_only_its_transaction() {
     });
 }
 
+/// A device without concatenation gets one register per READREG/WRITEREG; a
+/// multi-register op is split across commands and still resolves as one.
+#[test]
+fn register_ops_split_without_concatenation() {
+    sim(33).run(|| {
+        let device = Camera::with(CameraSpec {
+            concatenation: false,
+            ..CameraSpec::default()
+        });
+        let cam = connected(config(2));
+        let regs = [PROBE_REG, PROBE_REG + 4, PROBE_REG + 8];
+        let count = |command| {
+            device
+                .log()
+                .commands
+                .iter()
+                .filter(|c| c.command == command)
+                .count()
+        };
+
+        let writes = count(gvcp::WRITE_REGISTER_CMD);
+        cam.write_registers(regs.iter().zip(1..).map(|(&a, v)| (a, v)).collect())
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert_eq!(count(gvcp::WRITE_REGISTER_CMD) - writes, regs.len());
+
+        let reads = count(gvcp::READ_REGISTER_CMD);
+        let values = cam.read_registers(regs.to_vec()).unwrap().wait().unwrap();
+        assert_eq!(values, [1, 2, 3]);
+        assert_eq!(count(gvcp::READ_REGISTER_CMD) - reads, regs.len());
+        drop(cam);
+        device.stop();
+    });
+}
+
 const CALLERS: u32 = 4;
 const CALLS: u32 = 10;
 const LATENCY: Duration = Duration::from_millis(1);

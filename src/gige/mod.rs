@@ -186,6 +186,9 @@ pub(crate) struct Shared {
     pub(crate) stats: Mutex<LinkStats>,
     pub(crate) link: Arc<LinkCounters>,
     control_lost: AtomicBool,
+    /// The device accepts several registers in one READREG/WRITEREG
+    /// (`CAP_CONCATENATION`). Off until the capability register is read.
+    concatenation: AtomicBool,
 }
 
 impl Shared {
@@ -194,6 +197,7 @@ impl Shared {
             stats: Mutex::new(LinkStats::default()),
             link,
             control_lost: AtomicBool::new(false),
+            concatenation: AtomicBool::new(false),
         }
     }
 
@@ -203,6 +207,10 @@ impl Shared {
 
     fn control_lost(&self) -> bool {
         self.control_lost.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn concatenation(&self) -> bool {
+        self.concatenation.load(Ordering::Relaxed)
     }
 }
 
@@ -848,6 +856,10 @@ fn establish(
         .read_register(bootstrap::GVCP_CAPABILITY)
         .wait_timeout(budget)
         .map_err(unwrap_arc)?;
+    shared.concatenation.store(
+        capabilities & bootstrap::CAP_CONCATENATION != 0,
+        Ordering::Relaxed,
+    );
 
     let info = fetch_device_info(&port)?;
 

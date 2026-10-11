@@ -118,6 +118,7 @@ pub struct CameraSpec {
     pub exposure: Duration,
     pub packet_resend: bool,
     pub events: bool,
+    pub concatenation: bool,
     pub max_packet_size: Option<u16>,
     /// The block id of the first frame; ids wrap 0xffff -> 1.
     pub first_frame_id: u64,
@@ -134,6 +135,7 @@ impl Default for CameraSpec {
             exposure: EXPOSURE,
             packet_resend: false,
             events: false,
+            concatenation: true,
             max_packet_size: None,
             first_frame_id: 1,
         }
@@ -253,6 +255,7 @@ impl Camera {
         let mut device = GigeDevice::new(spec.ip, &cfg);
         device.set_packet_resend(spec.packet_resend);
         device.set_event_support(spec.events);
+        device.set_concatenation(spec.concatenation);
         device.set_max_packet_size(spec.max_packet_size);
         let state = Arc::new(Mutex::new(State {
             device,
