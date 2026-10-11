@@ -1,6 +1,6 @@
 [package]
 name = "telegenic"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["Bowan Foryt <bowan@valstad.com>"]
@@ -40,6 +40,7 @@ abi3t = ["py", "pyo3/abi3t-py315"]
 valuable = ["dep:valuable"]
 
 [dev-dependencies]
+minifb = "0.29.0"
 proptest = "1.11.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
