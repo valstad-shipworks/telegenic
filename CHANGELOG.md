@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.4 — 2026-10-14
+
+### Changed
+
+- The GVSP worker carries `LinuxBusyPoll`, `LinuxPreferBusyPoll` and
+  `LinuxBusyPollBudget` over to the epoll it waits in (`EPIOCSPARAMS`, Linux
+  6.9+, via fast-talker 0.3.2), so the thread spins for the next packet
+  instead of sleeping until the NIC's interrupt. The socket options alone
+  only governed a blocking receive, which the worker never does. A kernel
+  without the ioctl logs a warning and keeps the socket's own busy polling;
+  a budget above 64 without `CAP_NET_ADMIN` (`EPERM`) fails the stream open
+  like any other refused socket option. The GVCP socket refuses busy polling as before, and the
+  accepted-option tables are unchanged.
+- Needs fast-talker 0.3.2.
+
+## 2.0.3 — 2026-10-11
+
+- Multi-register `READREG`/`WRITEREG` ops go one register per command unless
+  the device advertises `CAP_CONCATENATION`, read from the GVCP capability
+  register at connect. The emulator advertises it; a sim test covers the
+  split path.
+- `live` example: a minifb live view that leaves the camera's settings
+  untouched.
+
+## 2.0.2 — 2026-10-07
+
+- The snare dev-dependency is only under `cfg(snare)`, and snare is `^3`.
+
 ## 2.0.1 — 2026-10-06
 
 ### Fixes
