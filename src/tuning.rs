@@ -152,6 +152,47 @@ pub(crate) fn bind_udp(
     Ok((socket, report))
 }
 
+/// Carries the busy polling `options` declare over to the epoll `poll` waits
+/// on, so the runner spins for the next packet instead of sleeping until the
+/// NIC's interrupt (Linux 6.9+). A kernel without the ioctl is logged and the
+/// socket's own busy polling stays; any other refusal fails the connect, as
+/// a refused socket option does.
+pub(crate) fn apply_epoll_busy_poll(
+    role: SocketRole,
+    poll: &mio::Poll,
+    options: &[SocketOption],
+) -> io::Result<()> {
+    let Some(p) = sockets::epoll_busy_poll_from(options) else {
+        return Ok(());
+    };
+    let driver = role.driver();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsFd;
+        match sockets::set_epoll_busy_poll(poll.registry().as_fd(), &p) {
+            Ok(()) => tracing::info!(
+                usecs = p.usecs,
+                budget = p.budget,
+                prefer = p.prefer,
+                "{driver} poll wait busy-polls the NIC queue"
+            ),
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => tracing::warn!(
+                error = %e,
+                "{driver} poll wait cannot busy-poll; it sleeps until the interrupt"
+            ),
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("epoll busy polling {p:?}: {e}"),
+                ));
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (driver, poll, p);
+    Ok(())
+}
+
 fn log<O: std::fmt::Debug>(driver: &str, what: &str, report: &Report<O>) {
     for a in &report.adjusted {
         tracing::warn!(

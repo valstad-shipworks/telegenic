@@ -20,7 +20,7 @@ use crate::gige::stream::frame::{BufSlot, Frame, FramePool, FrameStatus, Payload
 use crate::gige::stream::{StreamConfig, StreamShared, StreamStats};
 use crate::rx_timestamp::{self, StampedSocket};
 use crate::thread_util::{ExitGuard, ThreadHandle};
-use crate::tuning::{self, ThreadRole};
+use crate::tuning::{self, SocketRole, ThreadRole};
 use crate::wire::{self, StreamTelemetry};
 
 pub(crate) const TOK_SOCKET: Token = Token(0);
@@ -1007,6 +1007,7 @@ pub(crate) fn spawn(
         rx_timestamp::stamped(std_socket, "gvsp").map_err(|e| CameraError::Spawn(e.to_string()))?;
 
     let poll = Poll::new().map_err(|e| CameraError::Spawn(e.to_string()))?;
+    tuning::apply_epoll_busy_poll(SocketRole::UdpStreamRx, &poll, &cfg.stream_socket)?;
     poll.registry()
         .register(&mut socket, TOK_SOCKET, Interest::READABLE)
         .map_err(|e| CameraError::Spawn(e.to_string()))?;

@@ -78,7 +78,11 @@ pub struct StreamConfig {
     /// that default. Accepted: `RecvBuffer`, `BindDevice`, `LinuxBusyPoll`,
     /// `LinuxPreferBusyPoll`, `LinuxBusyPollBudget`, `WinCpuAffinity`.
     /// Refused: `SendBuffer`, `DontFragment`, `Dscp` and `LinuxPriority`,
-    /// which only shape traffic this socket doesn't send.
+    /// which only shape traffic this socket doesn't send. On Linux 6.9+ the
+    /// busy-poll options also set the busy polling of the poll the worker
+    /// waits in, so it spins for the next packet instead of sleeping until
+    /// the interrupt; an older kernel keeps the socket's own busy polling
+    /// and logs a warning.
     pub stream_socket: Vec<SocketOption>,
 }
 
