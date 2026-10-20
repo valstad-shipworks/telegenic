@@ -11,8 +11,8 @@ use roxmltree::Node as XmlNode;
 
 use crate::error::{GenicamError, GenicamResult};
 use crate::genicam::node::{
-    AccessMode, Cachable, Endianness, FormulaSlot, Genicam, Link, Node, NodeData, NodeId, RegKind,
-    RegisterCommon, Sign, ValueRef,
+    AccessMode, Cachable, Endianness, FormulaSlot, Genicam, Indexed, Link, Node, NodeData, NodeId,
+    RegKind, RegisterCommon, Sign, ValueRef,
 };
 
 /// Fallback definitions for standard features some vendor XMLs omit,
@@ -298,11 +298,7 @@ impl Builder {
                 *link = Link::Id(*id);
             }
         };
-        let resolve_ref = |vr: &mut ValueRef| {
-            if let ValueRef::Link(link) = vr {
-                resolve(link);
-            }
-        };
+        let resolve_ref = |vr: &mut ValueRef| resolve_value_ref(vr, &resolve);
 
         for data in &mut nodes {
             match &mut data.node {
@@ -357,6 +353,20 @@ impl Builder {
     }
 }
 
+fn resolve_value_ref(vr: &mut ValueRef, resolve: &impl Fn(&mut Link)) {
+    match vr {
+        ValueRef::Link(link) => resolve(link),
+        ValueRef::Indexed(indexed) => {
+            resolve(&mut indexed.index);
+            for (_, entry) in &mut indexed.entries {
+                resolve_value_ref(entry, resolve);
+            }
+            resolve_value_ref(&mut indexed.default, resolve);
+        }
+        _ => {}
+    }
+}
+
 fn text<'a>(el: XmlNode<'a, '_>, tag: &str) -> Option<&'a str> {
     el.children()
         .find(|c| c.is_element() && c.tag_name().name() == tag)
@@ -386,26 +396,76 @@ fn int_text(el: XmlNode<'_, '_>, tag: &str) -> Option<i64> {
 }
 
 fn int_value_ref(el: XmlNode<'_, '_>, literal: &str, pointer: &str) -> ValueRef {
+    if pointer == "pValue"
+        && let Some(indexed) = indexed(el, int_literal)
+    {
+        return indexed;
+    }
     if let Some(p) = text(el, pointer) {
         return ValueRef::Link(Link::Name(p.to_string()));
     }
-    match int_text(el, literal) {
-        Some(v) => ValueRef::LitInt(v),
-        None => ValueRef::None,
-    }
+    text(el, literal)
+        .and_then(int_literal)
+        .unwrap_or(ValueRef::None)
 }
 
 fn float_value_ref(el: XmlNode<'_, '_>, literal: &str, pointer: &str) -> ValueRef {
+    if pointer == "pValue"
+        && let Some(indexed) = indexed(el, float_literal)
+    {
+        return indexed;
+    }
     if let Some(p) = text(el, pointer) {
         return ValueRef::Link(Link::Name(p.to_string()));
     }
-    match text(el, literal).and_then(|t| t.parse::<f64>().ok()) {
-        Some(v) => ValueRef::LitFloat(v),
-        None => match int_text(el, literal) {
-            Some(v) => ValueRef::LitInt(v),
-            None => ValueRef::None,
-        },
+    text(el, literal)
+        .and_then(float_literal)
+        .unwrap_or(ValueRef::None)
+}
+
+fn int_literal(t: &str) -> Option<ValueRef> {
+    parse_i64(t).map(ValueRef::LitInt)
+}
+
+fn float_literal(t: &str) -> Option<ValueRef> {
+    t.parse::<f64>()
+        .ok()
+        .map(ValueRef::LitFloat)
+        .or_else(|| int_literal(t))
+}
+
+/// A `pIndex` value: its `pValueIndexed` / `ValueIndexed` entries and its
+/// `pValueDefault` / `ValueDefault`. `None` without a `pIndex`.
+fn indexed(el: XmlNode<'_, '_>, literal: fn(&str) -> Option<ValueRef>) -> Option<ValueRef> {
+    let index = text(el, "pIndex")?;
+    let mut entries = Vec::new();
+    for child in el.children().filter(|c| c.is_element()) {
+        let (Some(at), Some(body)) = (
+            child.attribute("Index").and_then(parse_i64),
+            child.text().map(str::trim),
+        ) else {
+            continue;
+        };
+        match child.tag_name().name() {
+            "pValueIndexed" => entries.push((at, ValueRef::Link(Link::Name(body.to_string())))),
+            "ValueIndexed" => {
+                if let Some(v) = literal(body) {
+                    entries.push((at, v));
+                }
+            }
+            _ => {}
+        }
     }
+    let default = match (text(el, "pValueDefault"), text(el, "ValueDefault")) {
+        (Some(p), _) => ValueRef::Link(Link::Name(p.to_string())),
+        (None, Some(t)) => literal(t).unwrap_or(ValueRef::None),
+        (None, None) => ValueRef::None,
+    };
+    Some(ValueRef::Indexed(Box::new(Indexed {
+        index: Link::Name(index.to_string()),
+        entries,
+        default,
+    })))
 }
 
 fn variables(el: XmlNode<'_, '_>) -> Vec<(String, Link)> {
