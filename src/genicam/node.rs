@@ -35,6 +35,25 @@ pub(crate) enum ValueRef {
     LitFloat(f64),
     LitStr(String),
     Link(Link),
+    Indexed(Box<Indexed>),
+}
+
+/// A value chosen by `pIndex`: the `pValueIndexed` / `ValueIndexed` entry
+/// whose `Index` equals the index node's value, else the default.
+#[derive(Debug, Clone)]
+pub(crate) struct Indexed {
+    pub index: Link,
+    pub entries: Vec<(i64, ValueRef)>,
+    pub default: ValueRef,
+}
+
+impl Indexed {
+    fn pick(&self, index: i64) -> &ValueRef {
+        self.entries
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map_or(&self.default, |(_, v)| v)
+    }
 }
 
 impl ValueRef {
@@ -303,6 +322,13 @@ impl Genicam {
         }
     }
 
+    /// The entry `ix` selects with its index node's current value.
+    fn selected(&mut self, ix: &Indexed, port: &dyn PortIo) -> GenicamResult<ValueRef> {
+        let index = self.resolve(&ix.index)?;
+        let at = self.int_value(index, port)?;
+        Ok(ix.pick(at).clone())
+    }
+
     fn ref_int(&mut self, vr: &ValueRef, port: &dyn PortIo) -> GenicamResult<i64> {
         match vr {
             ValueRef::LitInt(v) => Ok(*v),
@@ -310,6 +336,10 @@ impl Genicam {
             ValueRef::Link(link) => {
                 let id = self.resolve(link)?;
                 self.int_value(id, port)
+            }
+            ValueRef::Indexed(ix) => {
+                let entry = self.selected(ix, port)?;
+                self.ref_int(&entry, port)
             }
             ValueRef::None | ValueRef::LitStr(_) => {
                 Err(GenicamError::WrongType("<value reference>".into()))
@@ -324,6 +354,10 @@ impl Genicam {
             ValueRef::Link(link) => {
                 let id = self.resolve(link)?;
                 self.float_value(id, port)
+            }
+            ValueRef::Indexed(ix) => {
+                let entry = self.selected(ix, port)?;
+                self.ref_float(&entry, port)
             }
             ValueRef::None | ValueRef::LitStr(_) => {
                 Err(GenicamError::WrongType("<value reference>".into()))
@@ -457,6 +491,13 @@ impl Genicam {
                 }
                 Ok(())
             }
+            ValueRef::Indexed(ix) => match self.selected(ix, port)? {
+                ValueRef::Link(link) => {
+                    let target = self.resolve(&link)?;
+                    self.set_int_value(target, v, port)
+                }
+                _ => Err(GenicamError::Access(self.name_of(id).to_string())),
+            },
             _ => Err(GenicamError::Access(self.name_of(id).to_string())),
         }
     }
@@ -483,6 +524,10 @@ impl Genicam {
                     (_, v) => self.set_int_value(target, v.as_i64(), port),
                 }
             }
+            ValueRef::Indexed(ix) => match self.selected(ix, port)? {
+                entry @ ValueRef::Link(_) => self.set_ref_value(id, &entry, v, port),
+                _ => Err(GenicamError::Access(self.name_of(id).to_string())),
+            },
             _ => Err(GenicamError::Access(self.name_of(id).to_string())),
         }
     }
@@ -557,6 +602,13 @@ impl Genicam {
                     }
                     Ok(())
                 }
+                ValueRef::Indexed(ix) => match self.selected(ix, port)? {
+                    ValueRef::Link(link) => {
+                        let target = self.resolve(&link)?;
+                        self.set_float_value(target, v, port)
+                    }
+                    _ => Err(GenicamError::Access(self.name_of(id).to_string())),
+                },
                 _ => Err(GenicamError::Access(self.name_of(id).to_string())),
             },
             Node::Integer { .. } => self.set_int_value_inner(id, v.round() as i64, port),
@@ -801,7 +853,8 @@ impl Genicam {
                 Node::Integer { value, .. }
                 | Node::Float { value, .. }
                 | Node::Boolean { value, .. }
-                | Node::Enumeration { value, .. } => match value {
+                | Node::Enumeration { value, .. }
+                | Node::Converter { value, .. } => match self.static_entry(value) {
                     ValueRef::Link(Link::Id(next)) => id = *next,
                     ValueRef::LitInt(_) | ValueRef::LitFloat(_) => return AccessMode::RW,
                     _ => return AccessMode::RO,
@@ -811,6 +864,25 @@ impl Genicam {
             }
         }
         AccessMode::RO
+    }
+
+    /// The entry an indexed value selects when its index is a constant, else
+    /// its default: all [`access_mode`](Self::access_mode) can tell without
+    /// reading the device.
+    fn static_entry<'a>(&'a self, vr: &'a ValueRef) -> &'a ValueRef {
+        let ValueRef::Indexed(ix) = vr else {
+            return vr;
+        };
+        match &ix.index {
+            Link::Id(index) => match &self.nodes[index.0 as usize].node {
+                Node::Integer {
+                    value: ValueRef::LitInt(at),
+                    ..
+                } => ix.pick(*at),
+                _ => &ix.default,
+            },
+            Link::Name(_) => &ix.default,
+        }
     }
 
     fn eval_converter(
@@ -823,7 +895,11 @@ impl Genicam {
         port: &dyn PortIo,
     ) -> GenicamResult<Value> {
         // FROM direction: TO = the raw pValue, result = the user value.
-        let raw = match value {
+        let value = match value {
+            ValueRef::Indexed(ix) => self.selected(ix, port)?,
+            other => other.clone(),
+        };
+        let raw = match &value {
             ValueRef::Link(link) => {
                 let target = self.resolve(link)?;
                 match &self.nodes[target.0 as usize].node {
